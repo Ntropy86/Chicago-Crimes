@@ -1,0 +1,18 @@
+name: chicago
+channels:
+  - https://repo.anaconda.com/pkgs/main
+  - https://repo.anaconda.com/pkgs/r
+dependencies:
+  - python=3.10
+  - boto3
+  - jupyter
+  - notebook
+  - numpy
+  - pandas
+  - plotly
+  - pyspark
+  - python-dotenv
+  - scikit-learn
+  - statsmodels
+  - tensorflow
+prefix: /root/miniconda3/envs/chicago
