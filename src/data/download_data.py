@@ -32,7 +32,7 @@ class ChicagoCrimeDatasetDownloader:
      rate_limit (float) : Time to wait in between requests in seconds
     """
 
-    def __init__(self, start_year: int = 2001, rate_limit:float = 1.0 ) -> None:
+    def __init__(self, start_year: int=2001, rate_limit:float=1.0 ) -> None:
         """
         Initalize the Downloader with configs as mentioned in the class description
 
@@ -121,7 +121,7 @@ def download_census_data() -> int:
 
 def main():
     """
-    Main execution function
+    Main execution function for Dataset Download
     """
     try:
         logger.info('Running Dataset Downloader for Chicago Crimes')
