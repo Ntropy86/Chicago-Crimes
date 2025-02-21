@@ -108,7 +108,7 @@ chicago-crime-analysis/
 ## Getting Started
 1. Clone the repository
 ```bash
-git clone https://github.com/[username]/chicago-crime-analysis.git
+git clone https://github.com/[Ntropy86]/chicago-crime-analysis.git
 cd chicago-crime-analysis
 ```
 
@@ -121,7 +121,7 @@ pip install -r requirements.txt
 
 3. Download the dataset
 ```bash
-python src/data/download_data.py
+python -m src.data.download_data.py
 ```
 
 ## Contributing
@@ -131,5 +131,5 @@ Please read CONTRIBUTING.md for details on our code of conduct and the process f
 This project is licensed under the MIT License - see the LICENSE.md file for details
 
 ## Contact
-[Your Name] - [Your Email]
-Project Link: https://github.com/[username]/chicago-crime-analysis
+[Neat](<ADD Eastegg here>) - [kargeti@wisc.edu](mailto:kargeti@wisc.edu)
+Project Link: https://github.com/[Ntropy86]/chicago-crime-analysis
