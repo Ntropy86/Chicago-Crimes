@@ -212,50 +212,49 @@ class ChicagoCrimeDatasetDownloader:
             logger.error(f'Failed to fetch data for {year}-{month:02d}: {str(e)}')
             raise DatasetDownloadError(f'Failed to fetch data for {year}-{month:02d}: {str(e)}')
     
-    def _process_year(self,year:int) -> None:
-        """
-            Process and combine monthly data files for a specific year.
-
-            Args:
-                year: The year to process
-            
-            Raises:
-                DataDownloadError : See the logs for further Diagnosis of the error in download.
-            """
+    def _process_year(self, year: int) -> None:
+        """Process and combine monthly data files for a specific year."""
         try:
             temp_dir = Path('data/temp')
             monthly_files = list(temp_dir.glob(f'chicago_crimes_{year}_*.csv'))
             
             if not monthly_files:
-                raise Exception('Couldn\'t find monthly files')
+                raise Exception(f'No monthly files found for year {year}')
                 
-            # Combine all monthly files
             yearly_chunks = []
+            processed_files = []  # Track files we've processed
+            
+            # First read all files
             for file_path in monthly_files:
-                df = pd.read_csv(file_path)
-                yearly_chunks.append(df)
-                file_path.unlink() # Delete File
+                try:
+                    df = pd.read_csv(file_path)
+                    yearly_chunks.append(df)
+                    processed_files.append(file_path)
+                except Exception as e:
+                    logger.error(f"Failed to read file {file_path}: {str(e)}")
+                    continue
+                    
+            if not yearly_chunks:
+                raise Exception(f'No valid data found in monthly files for {year}')
                 
-            if yearly_chunks:
-                yearly_df = pd.concat(yearly_chunks, ignore_index=True)
-                output_path = f'data/raw/chicago_crimes_{year}.csv'
-                yearly_df.to_csv(output_path, index=False)
-                logger.info(f"Combined {len(yearly_df)} records for {year}")
-
-            if temp_dir.exists():
-                # Remove all files in temp dir
-                for file in temp_dir.iterdir():
-                    file.unlink()
-                # Remove directory itself
-                temp_dir.rmdir()
-                logger.debug(f"Cleaned up temporary directory")
-                
+            # Create yearly file
+            yearly_df = pd.concat(yearly_chunks, ignore_index=True)
+            output_path = Path('data/raw') / f'chicago_crimes_{year}.csv'
+            yearly_df.to_csv(output_path, index=False)
+            logger.info(f"Combined {len(yearly_df)} records for {year}")
+            
+            # Only after successful yearly file creation, delete monthly files
+            for file_path in processed_files:
+                try:
+                    file_path.unlink()
+                    logger.debug(f"Removed temporary file {file_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove temp file {file_path}: {str(e)}")
+                    
         except Exception as e:
             logger.error(f"Failed to process year {year}: {str(e)}")
-            raise DatasetDownloadError(f"Failed to process year {year}: {str(e)}")       
+            raise DatasetDownloadError(f"Failed to process year {year}: {str(e)}")
     
-
-
     def _download_dataset(self) -> None:
         """
         Downloads the Chicago Crime Dataset for all the years from start_year till present
