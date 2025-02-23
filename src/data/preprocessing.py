@@ -30,10 +30,10 @@ class CrimeDataProcessor:
     - Saving the Preprocessed Data
 
     Attributes:
-    raw_data_path (str): Path for the raw data folder. Defaults to 'data/raw'
-    processed_data_path (str): Path of the folder for processed data to be stored. Defaults to 'data/processed'
-    start_ywar (int): Starting year for processing 
-    expected_columns (dict): Key value pairs of the column names for chicago crimes dataset and it's expected datatype.
+        raw_data_path (str): Path for the raw data folder. Defaults to 'data/raw'
+        processed_data_path (str): Path of the folder for processed data to be stored. Defaults to 'data/processed'
+        start_ywar (int): Starting year for processing 
+        expected_columns (dict): Key value pairs of the column names for chicago crimes dataset and it's expected datatype.
     """
 
     def __init__(self,raw_data_path:str='data/raw', processed_data_path:str='data/processed', start_year:int=2001) -> None:
@@ -64,13 +64,13 @@ class CrimeDataProcessor:
         Loads the Raw Data from a CSV to a Pandas DataFrame
 
         Args:
-        year (int): Year of the dataset to load
+            year (int): Year of the dataset to load
 
         Returns:
-        pd.DataFrame: The dataframe containing all the values from the csv
+            pd.DataFrame: The dataframe containing all the values from the csv
 
         Raises:
-        DataProcessingError: Error with handling the csv. The message shall give more insights
+            DataProcessingError: Error with handling the csv. The message shall give more insights
         """ 
         try:
             file_path = self.raw_data_path + '/' + f'chicago_crimes_{year}.csv'
@@ -91,13 +91,13 @@ class CrimeDataProcessor:
         - Standardizes the Values when needed
 
         Args:
-        df (pd.DataFrame): Dataframe containing the Loaded Data
+            df (pd.DataFrame): Dataframe containing the Loaded Data
 
         Returns:
-        pd.DataFrame: Cleaned Dataframe
+            pd.DataFrame: Cleaned Dataframe
 
         Raises:
-        DataProcessingError : Error Raised in Cleaning Data. See message for more details
+            DataProcessingError : Error Raised in Cleaning Data. See message for more details
         """
 
         try:
@@ -168,13 +168,13 @@ class CrimeDataProcessor:
         Creates new features from the existing dataset
 
         Args:
-        df (pd.DataFrame): Dataframe containing cleaned data 
+            df (pd.DataFrame): Dataframe containing cleaned data 
 
         Returns:
-        pd.DataFrame: Dataframe with new features added
+            pd.DataFrame: Dataframe with new features added
 
         Raises:
-        DataProcessingError : Error Raised in Feature Engineering. See message for more details
+            DataProcessingError : Error Raised in Feature Engineering. See message for more details
         """
 
         logger.info('Starting Feature Engineering Process!')
@@ -209,13 +209,13 @@ class CrimeDataProcessor:
         - Saves the processed data in self.processed_data_path folder
 
         Args:
-        year (int): Year of the Data Report to be Processed
+            year (int): Year of the Data Report to be Processed
 
         Returns:
-        None
+            None
 
         Raises:
-        DataProcessingError : If any of the above methods fail, this raises an Exception.
+            DataProcessingError : If any of the above methods fail, this raises an Exception.
         """
         try:
             df = self._load_raw_data(year)
