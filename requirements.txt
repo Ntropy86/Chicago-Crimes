@@ -159,4 +159,3 @@ wheel==0.45.1
 widgetsnbextension==4.0.13
 wrapt==1.17.2
 zipp==3.21.0
-zstandard==0.19.0
