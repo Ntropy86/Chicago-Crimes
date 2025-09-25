@@ -3,7 +3,7 @@ __pycache__/
 .env
 .ipynb_checkpoints/
 *.pyc
-data/raw/
+data/
 data/processed/
 .DS_Store
 .vscode/
