@@ -18,15 +18,37 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 
-# === Configs ===
-try:
-    from src.utils.logger_config import setup_logger
-    from src.utils.exceptions import DataProcessingError, ConfigError
-    logger = setup_logger(__name__)
-    logger.info('Logger successfully Initialized (L2)')
-except Exception as e:
-    print(f'CRITICAL ERROR: l2_features : Logger Config issue : {str(e)}')
-    sys.exit(1)
+# === Standalone Logging ===
+import logging
+
+def setup_standalone_logger():
+    os.makedirs('logs', exist_ok=True)
+    logger = logging.getLogger('l2_features')
+    logger.setLevel(logging.DEBUG)
+    
+    # File handler
+    fh = logging.FileHandler(f'logs/l2_features_{datetime.now().strftime("%m%d%Y")}.log')
+    fh.setLevel(logging.DEBUG)
+    fh_fmt = logging.Formatter('%(levelname)s : %(name)s.%(funcName)s : %(message)s')
+    fh.setFormatter(fh_fmt)
+    
+    # Console handler  
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch_fmt = logging.Formatter('%(asctime)s - %(levelname)s : %(message)s')
+    ch.setFormatter(ch_fmt)
+    
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+    return logger
+
+logger = setup_standalone_logger()
+
+class DataProcessingError(Exception):
+    pass
+
+class ConfigError(Exception):
+    pass
 # === END Configs ===
 
 L1_DIR = Path('data/l1')

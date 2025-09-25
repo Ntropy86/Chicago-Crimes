@@ -28,16 +28,37 @@ from pathlib import Path
 
 
 
-# === Configs ===
-try:
-    from src.utils.logger_config import setup_logger
-    from src.utils.exceptions import DatasetDownloadError,ConfigError
-    logger = setup_logger(__name__)
-    logger.info('Logger successfully Initalized')
-except Exception as e:
-    print(f'CRITICAL ERROR: download_data : Logger Config issue : {str(e)}')
-    exit(1)
+# === Standalone Logging ===
+import logging
 
+def setup_standalone_logger():
+    os.makedirs('logs', exist_ok=True)
+    logger = logging.getLogger('download_data')
+    logger.setLevel(logging.DEBUG)
+    
+    # File handler
+    fh = logging.FileHandler(f'logs/chicago_crime_{datetime.now().strftime("%m%d%Y")}.log')
+    fh.setLevel(logging.DEBUG)
+    fh_fmt = logging.Formatter('%(levelname)s : %(name)s.%(funcName)s : %(message)s')
+    fh.setFormatter(fh_fmt)
+    
+    # Console handler  
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch_fmt = logging.Formatter('%(asctime)s - %(levelname)s : %(message)s')
+    ch.setFormatter(ch_fmt)
+    
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+    return logger
+
+logger = setup_standalone_logger()
+
+class DatasetDownloadError(Exception):
+    pass
+
+class ConfigError(Exception):
+    pass
 # === END Configs ===
 
 class ChicagoCrimeDatasetDownloader:
