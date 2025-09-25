@@ -159,3 +159,9 @@ wheel==0.45.1
 widgetsnbextension==4.0.13
 wrapt==1.17.2
 zipp==3.21.0
+
+# L1/L2 processing dependencies
+h3==4.3.1
+pyarrow==19.0.1
+hdbscan==0.8.33
+holidays==0.56
