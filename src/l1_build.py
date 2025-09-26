@@ -59,36 +59,63 @@ class ConfigError(Exception):
 RAW_DIR = Path('data/raw')
 L1_DIR = Path('data/l1')
 
+# Column name standardization mapping (raw CSV has lowercase names)
+COLUMN_MAPPING: Dict[str, str] = {
+    'id': 'id',  # already standardized
+    'case_number': 'case_number',  # already standardized 
+    'date': 'created_date',
+    'block': 'block_address',
+    'iucr': 'iucr_code',
+    'primary_type': 'crime_type',
+    'description': 'crime_description',
+    'location_description': 'location_type',
+    'arrest': 'arrest_made',
+    'domestic': 'is_domestic',
+    'beat': 'beat_id',
+    'district': 'district_id', 
+    'ward': 'ward_id',
+    'community_area': 'community_area_id',
+    'fbi_code': 'fbi_code',  # already standardized
+    'x_coordinate': 'x_coordinate',  # already standardized
+    'y_coordinate': 'y_coordinate',  # already standardized
+    'year': 'incident_year',
+    'updated_on': 'updated_on',  # already standardized
+    'latitude': 'latitude',  # already standardized
+    'longitude': 'longitude',  # already standardized
+    'location': 'location_point',
+}
+
+# Standardized column types
 CORE_COLUMNS: Dict[str, str] = {
     'id': 'string',
     'case_number': 'string',
-    'date': 'string',
-    'block': 'string',
-    'iucr': 'string',
-    'primary_type': 'string',
-    'description': 'string',
-    'location_description': 'string',
-    'arrest': 'boolean',
-    'domestic': 'boolean',
-    'beat': 'Int64',
-    'district': 'Int64',
-    'ward': 'Int64',
-    'community_area': 'Int64',
+    'created_date': 'string',
+    'block_address': 'string',
+    'iucr_code': 'string',
+    'crime_type': 'string',
+    'crime_description': 'string',
+    'location_type': 'string',
+    'arrest_made': 'boolean',
+    'is_domestic': 'boolean',
+    'beat_id': 'Int64',
+    'district_id': 'Int64',
+    'ward_id': 'Int64',
+    'community_area_id': 'Int64',
     'fbi_code': 'string',
     'x_coordinate': 'float64',
     'y_coordinate': 'float64',
-    'year': 'Int64',
+    'incident_year': 'Int64',
     'updated_on': 'string',
     'latitude': 'float64',
     'longitude': 'float64',
-    'location': 'string',
+    'location_point': 'string',
 }
 
 KEEP_COLUMNS: List[str] = [
-    'id','case_number','date','block','iucr','primary_type','description',
-    'location_description','arrest','domestic','beat','district','ward',
-    'community_area','fbi_code','x_coordinate','y_coordinate','year',
-    'updated_on','latitude','longitude'
+    'id','case_number','created_date','block_address','iucr_code','crime_type',
+    'crime_description','location_type','arrest_made','is_domestic','beat_id',
+    'district_id','ward_id','community_area_id','fbi_code','x_coordinate',
+    'y_coordinate','incident_year','updated_on','latitude','longitude','location_point'
 ]
 
 
@@ -109,10 +136,27 @@ def _read_raw_year(year_path: Path) -> pd.DataFrame:
         raise DataProcessingError(f'Failed reading {year_path}: {e}')
 
 
+def _standardize_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Standardize column names from messy raw CSV to clean semantic names"""
+    # Map raw column names to standardized names
+    df = df.rename(columns=COLUMN_MAPPING)
+    
+    # Log column mapping for transparency
+    mapped_cols = [col for col in df.columns if col in COLUMN_MAPPING.values()]
+    logger.debug(f"Standardized {len(mapped_cols)} column names")
+    
+    return df
+
+
 def _normalize_and_cast(df: pd.DataFrame) -> pd.DataFrame:
+    # First standardize column names
+    df = _standardize_column_names(df)
+    
     # Keep only known columns present
     cols_present = [c for c in KEEP_COLUMNS if c in df.columns]
     df = df[cols_present].copy()
+    
+    logger.debug(f"Kept {len(cols_present)} out of {len(KEEP_COLUMNS)} expected columns")
 
     # Cast types where possible
     for col, dtype in CORE_COLUMNS.items():
@@ -125,19 +169,29 @@ def _normalize_and_cast(df: pd.DataFrame) -> pd.DataFrame:
             except Exception:
                 logger.warning(f'Type cast failed for {col}; leaving as-is')
 
-    # Parse date column to datetime
-    if 'date' in df.columns:
+    # Parse date column to datetime (now using standardized name)
+    if 'created_date' in df.columns:
         try:
-            df['datetime'] = pd.to_datetime(df['date'], errors='coerce')
+            df['datetime'] = pd.to_datetime(df['created_date'], errors='coerce')
         except Exception:
             df['datetime'] = pd.NaT
     else:
         df['datetime'] = pd.NaT
 
+    # Data Quality Reporting
+    total_records = len(df)
+    null_datetime = df['datetime'].isna().sum()
+    null_coords = df[['latitude', 'longitude']].isna().any(axis=1).sum()
+    
+    logger.info(f"Data Quality Check - Total records: {total_records:,}")
+    logger.info(f"Data Quality Check - Null datetime: {null_datetime:,} ({null_datetime/total_records*100:.1f}%)")
+    logger.info(f"Data Quality Check - Null coordinates: {null_coords:,} ({null_coords/total_records*100:.1f}%)")
+
     # Drop rows without valid datetime
     before = len(df)
     df = df[~df['datetime'].isna()].copy()
-    logger.debug(f'Dropped {before - len(df)} rows without valid datetime')
+    dropped_datetime = before - len(df)
+    logger.info(f'Dropped {dropped_datetime:,} rows without valid datetime')
 
     # Derive partitions
     df['year_part'] = df['datetime'].dt.year.astype('int32')
@@ -145,12 +199,27 @@ def _normalize_and_cast(df: pd.DataFrame) -> pd.DataFrame:
 
     # Filter invalid coordinates (Chicago approx bounds)
     if 'latitude' in df.columns and 'longitude' in df.columns:
+        before_coords = len(df)
         lat = df['latitude']
         lon = df['longitude']
-        valid = lat.between(41.0, 42.5) & lon.between(-88.5, -87.0)
-        dropped = (~valid).sum()
+        
+        # Check for null coordinates first
+        has_coords = ~(lat.isna() | lon.isna())
+        
+        # Then check bounds for non-null coordinates
+        valid_bounds = lat.between(41.0, 42.5) & lon.between(-88.5, -87.0)
+        
+        # Keep records with valid coordinates within Chicago bounds
+        valid = has_coords & valid_bounds
         df = df[valid].copy()
-        logger.debug(f'Dropped {dropped} rows with invalid coordinates')
+        
+        dropped_coords = before_coords - len(df)
+        logger.info(f'Dropped {dropped_coords:,} rows with invalid/missing coordinates')
+        
+        # Final data quality summary
+        final_records = len(df)
+        total_dropped = total_records - final_records
+        logger.info(f"Final L1 output: {final_records:,} records ({total_dropped:,} dropped, {total_dropped/total_records*100:.1f}%)")
 
     return df
 
