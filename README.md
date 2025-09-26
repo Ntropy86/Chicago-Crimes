@@ -1,3 +1,82 @@
+# Chicago Crimes
+
+Repository for Chicago crimes medallion pipeline.
+## Current processing status (as of 2025-09-26)
+
+- L1: Raw CSVs are stored under `data/raw/` and L1 parquet partitions are under `data/l1/`.
+- L2: Features have been re-run and now materialize H3 identifiers at resolutions r7, r8 and r9.
+   - L2 parquet files: `data/l2/year=YYYY/month=MM/features-YYYY-MM.parquet`.
+   - H3 columns in L2: `h3_r7`, `h3_r8`, `h3_r9` (pandas `string` dtype, `pd.NA` for invalid/missing).
+- L3: Deterministic daily and monthly aggregates were generated for res=7/8/9 and are stored under `data/l3/res={res}/year=YYYY/month=MM/`.
+
+## How to re-run pipelines
+
+All commands assume you are in the repository root and using the project's Python environment.
+
+Re-run L2 (L1 -> L2):
+
+```bash
+python3 src/l2_features.py
+```
+
+Re-run deterministic L3 aggregator (reads L2 partitions and writes per-resolution daily/monthly parquet):
+
+```bash
+python3 src/l3_multiscale.py
+```
+
+Run the clustering prototype (UMAP + HDBSCAN) for a specific year/month (example: 2024-09):
+
+```bash
+python3 src/l3_clustering_prototype.py 2024 09
+```
+
+## Quick smoke-checks
+
+Check sample L2 partition contains H3 columns and sample L3 file exists:
+
+```bash
+python3 - <<'PY'
+import pyarrow.parquet as pq
+import pandas as pd
+import sys
+from pathlib import Path
+
+sample = Path('data/l2/year=2024/month=09/features-2024-09.parquet')
+if sample.exists():
+      df = pd.read_parquet(sample)
+      print('L2 cols:', ','.join(df.columns[:20]))
+      for c in ['h3_r7','h3_r8','h3_r9']:
+            print(c, 'in L2?', c in df.columns)
+else:
+      print('L2 sample not found:', sample)
+
+sample_l3 = Path('data/l3/res=9/year=2024/month=09/l3-aggregates-9-2024-09.parquet')
+print('L3 sample exists?', sample_l3.exists())
+PY
+```
+
+## Dependencies
+
+Primary requirements are listed in `requirements.txt`. Notable extras used by the prototypes:
+
+- `h3` (H3 spatial index Python binding)
+- `hdbscan` (clustering)
+- `umap-learn` (optional, used by the clustering prototype; add to requirements if you want to run clustering)
+
+To install extras:
+
+```bash
+pip install umap-learn
+```
+
+## Notes and maintenance
+
+- The L2 writer enforces deterministic parquet schema (no pandas `category` dtype; dates normalized to `datetime64[ns]`) to avoid dataset schema merge problems across row-groups.
+- H3 assignment code is robust to different Python `h3` bindings (detects `geo_to_h3` vs `latlng_to_cell` and falls back safely).
+- The L3 aggregator is tolerant to alternate column names (e.g., alternate arrest flag names) and will fall back to safe defaults when fields are missing.
+
+If you want a short automated smoke-check or unit tests added to the repo, tell me which checks you prefer and I'll add them and run them.
 # Chicago Crime Data Forecasting & Hotspot Analysis with AI Agent
 
 ## Project Overview
