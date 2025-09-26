@@ -186,3 +186,61 @@ This project is licensed under the MIT License - see the LICENSE.md file for det
 ## Contact
 [Neat](<ADD Eastegg here>) - [kargeti@wisc.edu](mailto:kargeti@wisc.edu)
 Project Link: https://github.com/[Ntropy86]/chicago-crime-analysis
+
+## Bug fixes, notes and L2 CLI behavior
+
+### L2 bug fixes and notes
+- H3 assignment crash (H3ResDomainError) when running inside pandas DataFrame processing: fixed by explicitly casting latitude and longitude to Python floats when calling the C-extension `h3.latlng_to_cell`, and by adding safe per-row exception handling. Records that cannot be assigned an H3 index are now labeled `'UNKNOWN'` (but the fix reduced those to zero in sampled runs).
+- Street/block normalization mismatch: L1 sometimes stores street info under `block` while L2 expected `block_address`. L2 now falls back to `block` when `block_address` is missing and normalizes that value to `street_norm`.
+- L2 CLI `start_year` behavior: the first CLI argument to `src/l2_features.py` is treated as a start year (YYYY). The script processes all L1 partitions under `data/l1/year=YYYY` for all years >= start_year up through the latest available partition. Example: `python src/l2_features.py 2018` will process 2018, 2019, ..., up to the most recent year present in `data/l1`.
+
+### Quick verification performed
+- Ran full L2 from `2018` → latest available (2025/08) and wrote L2 outputs under `data/l2/year=.../month=.../features-YYYY-MM.parquet`.
+- Sampled files (2018-01, 2022-06, 2025-08) verified for required columns: `h3_r9`, `street_norm`, temporal features and cyclical encodings (hour_sin/hour_cos etc.). No H3 unknowns in those samples.
+
+If you want reproducible checks, a `--dry-run` flag is a low-risk addition I can add to `src/l2_features.py` to preview the partitions that would be processed without executing compute/writes.
+
+## Diagrams (Mermaid)
+
+### Overall ETL pipeline
+
+```mermaid
+flowchart LR
+   RAW[Raw data (CSV)] --> L1[L1: Standardized Parquet]
+   L1 --> L2[L2: Feature Engineered Parquet]
+   L2 --> L3[L3: Aggregations / Model-ready]
+   L3 --> ML[ML Models & Forecasting]
+   ML --> Dashboard[Visualization / Agent]
+   subgraph Storage
+      RAW
+      L1
+      L2
+      L3
+   end
+```
+
+### L1 pipeline (single-month partition)
+
+```mermaid
+flowchart TD
+   raw_csv[raw CSV (chicago_crimes_YYYY.csv)] -->|column mapping & dtype coercion| l1_parquet[L1: part-YYYY-MM.parquet]
+   l1_parquet -->|partitioned by year/month| data_l1[data/l1/year=YYYY/month=MM]
+   note1[Notes: map 'block' -> 'block_address' when present]
+   raw_csv -.-> note1
+```
+
+### L2 pipeline (per partition)
+
+```mermaid
+flowchart LR
+   l1_partition[L1 month parquet] --> missing[Missing data handling & type fixes]
+   missing --> temporal[Temporal features & cyclical encodings]
+   missing --> street[Street normalization (block_address or block -> street_norm)]
+   street --> h3[H3 assignment (res=9) – safe casts & exception handling]
+   temporal --> features[Assemble features]
+   h3 --> features
+   features --> write[Write L2 features -> data/l2/year=YYYY/month=MM/features-YYYY-MM.parquet]
+
+   note2[Notes: H3 call uses Python float casting; failures -> 'UNKNOWN']
+   h3 -.-> note2
+```
