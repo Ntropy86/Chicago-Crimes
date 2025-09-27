@@ -42,7 +42,8 @@ python3 src/l3_clustering_prototype.py YEAR MONTH
 streamlit run app.py
 ```
 
-- The dashboard uses L3 aggregates to plot daily trends, H3 hotspot maps, and highlight low-confidence cells.
+- The dashboard uses L3 aggregates to plot daily trends, H3 hotspot choropleths (zoomed to Chicago streets), and highlight low-confidence cells.
+- Crime mix filters and signature street rollups make each hexagon easier to interpret before we move to forecasting.
 - Optional checkbox reruns the clustering prototype for the selected month.
 
 ### Notebook for deeper analysis
