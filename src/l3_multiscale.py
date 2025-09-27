@@ -13,6 +13,7 @@ from pathlib import Path
 import sys
 import logging
 from datetime import datetime
+from typing import Optional
 
 import pandas as pd
 import numpy as np
@@ -46,6 +47,49 @@ L3_DIR = Path('data/l3')
 
 logger = logging.getLogger('l3_multiscale')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def _prepare_arrest_flags(df: pd.DataFrame, arrest_col: Optional[str]) -> pd.Series:
+    if arrest_col is None:
+        return pd.Series(np.zeros(len(df), dtype=int), index=df.index)
+    raw = pd.Series(df[arrest_col])
+    try:
+        normalized = raw.astype('boolean')
+    except Exception:
+        normalized = raw.fillna(False).isin([True, 'true', 'True', '1', 1])
+        normalized = pd.Series(normalized, index=raw.index, dtype='boolean')
+    filled = normalized.fillna(False)
+    return filled.astype(int)
+
+
+def aggregate_daily_counts(df: pd.DataFrame, hcol: str, arrest_col: Optional[str] = None) -> pd.DataFrame:
+    subset = df[[hcol, 'date']].copy()
+    subset = subset.dropna(subset=[hcol])
+    if subset.empty:
+        return pd.DataFrame(columns=[hcol, 'date', 'n_crimes', 'n_arrests'])
+    subset['n_crime_unit'] = 1
+    subset['arrest_flag'] = _prepare_arrest_flags(df, arrest_col).reindex(subset.index).fillna(0).astype(int)
+    grouped = (
+        subset.groupby([hcol, 'date'], observed=True)[['n_crime_unit', 'arrest_flag']]
+        .sum()
+        .rename(columns={'n_crime_unit': 'n_crimes', 'arrest_flag': 'n_arrests'})
+        .reset_index()
+    )
+    return grouped
+
+
+def aggregate_monthly_counts(daily_df: pd.DataFrame, hcol: str) -> pd.DataFrame:
+    if daily_df.empty:
+        return pd.DataFrame(columns=[hcol, 'month', 'n_crimes', 'n_arrests'])
+    temp = daily_df.copy()
+    temp['month'] = temp['date'].dt.to_period('M')
+    monthly = (
+        temp.groupby([hcol, 'month'], observed=True)[['n_crimes', 'n_arrests']]
+        .sum()
+        .reset_index()
+    )
+    monthly['month'] = monthly['month'].dt.to_timestamp()
+    return monthly
 
 
 def wilson_ci(k, n, z=1.96):
@@ -106,76 +150,102 @@ def aggregate_for_month(year: int, month: int, h3_resolutions=None, alpha=5.0, p
         id_col = next((c for c in id_candidates if c in df.columns), None)
         arrest_col = next((c for c in arrest_candidates if c in df.columns), None)
 
-        if id_col is not None:
-            n_crime_agg = (id_col, 'count')
-        else:
-            # fallback to size if no id column
-            n_crime_agg = (df.columns[0], 'size')
+        grp = aggregate_daily_counts(df, hcol, arrest_col)
 
-        def arrest_counter(s):
-            if arrest_col is None:
-                return 0
-            # coerce truthy values to boolean
-            return int(pd.Series(s).eq(True).sum())
+        if grp.empty:
+            continue
 
-        grp = df.groupby([hcol, 'date']).agg(
-            n_crimes = n_crime_agg,
-            n_arrests = (arrest_col if arrest_col is not None else df.columns[0], lambda s: arrest_counter(s))
-        ).reset_index()
+        n_crimes = grp['n_crimes'].to_numpy(dtype=float)
+        n_arrests = grp['n_arrests'].to_numpy(dtype=float)
 
-        # compute raw rate, low confidence flag
-        grp['raw_rate'] = grp.apply(lambda r: float(r['n_arrests'] / r['n_crimes']) if r['n_crimes']>0 else 0.0, axis=1)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            raw_rate = np.divide(n_arrests, n_crimes, out=np.zeros_like(n_arrests, dtype=float), where=n_crimes > 0)
+        grp['raw_rate'] = raw_rate
         grp['low_conf'] = grp['n_crimes'] < 5
 
-        # global prior for this month/resolution (avoid division by zero)
-        total_n = grp['n_crimes'].sum()
-        total_k = grp['n_arrests'].sum()
+        total_n = float(n_crimes.sum())
+        total_k = float(n_arrests.sum())
         prior = float(total_k / total_n) if total_n > 0 else 0.0
 
-        # smoothed rate and CI
-        grp['smoothed_rate'] = grp.apply(lambda r: smoothed_rate(r['n_crimes'], r['n_arrests'], prior, alpha=alpha), axis=1)
-        cis = grp.apply(lambda r: wilson_ci(r['n_arrests'], r['n_crimes']), axis=1)
-        grp[['ci_low','ci_high']] = pd.DataFrame(cis.tolist(), index=grp.index)
+        grp['smoothed_rate'] = np.where(
+            grp['n_crimes'] > 0,
+            (alpha * prior + grp['n_arrests']) / (alpha + grp['n_crimes']),
+            float(prior)
+        )
 
-        # neighbor pooling (k-ring) for low confidence cells
+        def _wilson_interval(k_vals: np.ndarray, n_vals: np.ndarray, z: float = 1.96):
+            low = np.zeros_like(k_vals, dtype=float)
+            high = np.zeros_like(k_vals, dtype=float)
+            mask = n_vals > 0
+            if not np.any(mask):
+                return low, high
+            p = np.zeros_like(k_vals, dtype=float)
+            p[mask] = k_vals[mask] / n_vals[mask]
+            z2 = z ** 2
+            denom = 1 + z2 / n_vals[mask]
+            centre = p[mask] + z2 / (2 * n_vals[mask])
+            adj = z * np.sqrt(p[mask] * (1 - p[mask]) / n_vals[mask] + z2 / (4 * n_vals[mask] ** 2))
+            low_vals = (centre - adj) / denom
+            high_vals = (centre + adj) / denom
+            low[mask] = np.clip(low_vals, 0.0, 1.0)
+            high[mask] = np.clip(high_vals, 0.0, 1.0)
+            return low, high
+
+        ci_low, ci_high = _wilson_interval(n_arrests, n_crimes)
+        grp['ci_low'] = ci_low
+        grp['ci_high'] = ci_high
+
         if h3 is not None and pool_k >= 1 and k_ring_func is not None:
-            # build counts map for quick lookup
-            counts_map = {}
-            arrests_map = {}
-            for _, row in grp.iterrows():
-                hid = row[hcol]
-                if pd.isna(hid):
-                    continue
+            unique_cells = grp[hcol].dropna().unique()
+            neighbor_edges = []
+            for cell in unique_cells:
                 try:
-                    k = int(row['n_crimes'])
-                except Exception:
-                    k = 0
-                try:
-                    a = int(row['n_arrests'])
-                except Exception:
-                    a = 0
-                counts_map[str(hid)] = k
-                arrests_map[str(hid)] = a
+                    ring = k_ring_func(cell, pool_k)
+                except Exception as exc:
+                    logger.debug('k_ring failed for %s: %s', cell, exc)
+                    ring = {cell}
+                for neighbor in ring:
+                    neighbor_edges.append((cell, neighbor))
 
-            def pooled_counts(hid):
-                if pd.isna(hid):
-                    return 0,0
-                try:
-                    ring = k_ring_func(hid, pool_k)
-                except Exception:
-                    # if k_ring fails for this hid, return self counts
-                    return counts_map.get(str(hid), 0), arrests_map.get(str(hid), 0)
-                n = sum(counts_map.get(r, 0) for r in ring)
-                k_ = sum(arrests_map.get(r, 0) for r in ring)
-                return int(n), int(k_)
-
-            pooled = grp[hcol].apply(pooled_counts)
-            grp[['pooled_n','pooled_k']] = pd.DataFrame(pooled.tolist(), index=grp.index)
-            grp['pooled_rate'] = grp.apply(lambda r: float(r['pooled_k']/r['pooled_n']) if r['pooled_n']>0 else prior, axis=1)
-            grp['pooled_smoothed'] = grp.apply(lambda r: smoothed_rate(r['pooled_n'], r['pooled_k'], prior, alpha=alpha), axis=1)
+            if neighbor_edges:
+                neighbor_df = pd.DataFrame(neighbor_edges, columns=[hcol, 'neighbor'])
+                expanded = grp.merge(neighbor_df, on=hcol, how='left')
+                neighbor_counts = grp[[hcol, 'date', 'n_crimes', 'n_arrests']].rename(columns={hcol: 'neighbor'})
+                expanded = expanded.merge(
+                    neighbor_counts,
+                    on=['date', 'neighbor'],
+                    how='left',
+                    suffixes=('', '_nbr')
+                )
+                expanded[['n_crimes_nbr', 'n_arrests_nbr']] = expanded[['n_crimes_nbr', 'n_arrests_nbr']].fillna(0)
+                pooled = (
+                    expanded.groupby(['date', hcol], observed=True)[['n_crimes_nbr', 'n_arrests_nbr']]
+                    .sum()
+                    .rename(columns={'n_crimes_nbr': 'pooled_n', 'n_arrests_nbr': 'pooled_k'})
+                    .reset_index()
+                )
+                grp = grp.merge(pooled, on=['date', hcol], how='left')
+                grp[['pooled_n', 'pooled_k']] = grp[['pooled_n', 'pooled_k']].fillna({'pooled_n': 0.0, 'pooled_k': 0.0})
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    grp['pooled_rate'] = np.divide(
+                        grp['pooled_k'],
+                        grp['pooled_n'],
+                        out=np.full(len(grp), prior, dtype=float),
+                        where=grp['pooled_n'] > 0
+                    )
+                grp['pooled_smoothed'] = np.where(
+                    grp['pooled_n'] > 0,
+                    (alpha * prior + grp['pooled_k']) / (alpha + grp['pooled_n']),
+                    grp['smoothed_rate']
+                )
+            else:
+                grp['pooled_n'] = 0.0
+                grp['pooled_k'] = 0.0
+                grp['pooled_rate'] = prior
+                grp['pooled_smoothed'] = grp['smoothed_rate']
         else:
-            grp['pooled_n'] = 0
-            grp['pooled_k'] = 0
+            grp['pooled_n'] = 0.0
+            grp['pooled_k'] = 0.0
             grp['pooled_rate'] = prior
             grp['pooled_smoothed'] = grp['smoothed_rate']
 
@@ -187,10 +257,9 @@ def aggregate_for_month(year: int, month: int, h3_resolutions=None, alpha=5.0, p
         logger.info('Wrote L3 daily aggregates %s rows=%d', out_file, len(grp))
 
         # also produce monthly aggregates for the same res
-        grp_month = grp.groupby(hcol).agg(
-            n_crimes = ('n_crimes','sum'),
-            n_arrests = ('n_arrests','sum')
-        ).reset_index()
+        grp_month = aggregate_monthly_counts(grp, hcol)
+        if 'month' in grp_month.columns:
+            grp_month = grp_month.drop(columns=['month'])
         grp_month['raw_rate'] = grp_month.apply(lambda r: float(r['n_arrests']/r['n_crimes']) if r['n_crimes']>0 else 0.0, axis=1)
         grp_month['smoothed_rate'] = grp_month.apply(lambda r: smoothed_rate(r['n_crimes'], r['n_arrests'], prior, alpha=alpha), axis=1)
         month_out_dir = L3_DIR / f'res={res}' / f'year={year}' / f'month={month:02d}'

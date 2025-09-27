@@ -17,6 +17,9 @@ from datetime import datetime
 
 import pandas as pd
 import numpy as np
+from pandas.api.types import CategoricalDtype
+
+from utils import categorize_primary_type
 
 # === Standalone Logging ===
 import logging
@@ -28,6 +31,11 @@ try:
 except Exception as e:
     h3 = None
     h3_version = f'not importable: {e}'
+
+try:
+    from h3.api.numpy_int import vectorized_latlng_to_cell
+except Exception:
+    vectorized_latlng_to_cell = None
 
 # Minimal diagnostics go to logger after setup; avoid noisy prints on import.
 
@@ -92,51 +100,100 @@ def _cyclical_encode(series: pd.Series, period: int, prefix: str) -> pd.DataFram
     })
 
 
-def _assign_h3(df: pd.DataFrame, res: int) -> pd.Series:
-    """Assign H3 hexagon IDs with robust error handling"""
-    # Process all coordinates with explicit type conversion
-    h3_ids = []
-    success_count = 0
+if h3 is not None:
+    if hasattr(h3, 'cell_to_parent'):
+        _cell_to_parent = h3.cell_to_parent
+    elif hasattr(h3, 'h3_to_parent'):
+        _cell_to_parent = h3.h3_to_parent
+    else:
+        _cell_to_parent = None
+    _int_to_str = getattr(h3, 'int_to_str', None) or getattr(h3, 'h3_to_string', None)
+else:
+    _cell_to_parent = None
+    _int_to_str = None
 
-    for idx, row in df.iterrows():
-        lat = row.get('latitude')
-        lon = row.get('longitude')
 
-        if pd.notna(lat) and pd.notna(lon):
-            try:
-                lat_float = float(lat)
-                lon_float = float(lon)
+def _cells_to_str(cells: np.ndarray) -> np.ndarray:
+    """Normalize H3 ids to their canonical string representation."""
+    if cells.dtype.kind in {'U', 'S', 'O'}:
+        return cells.astype(object)
+    if _int_to_str is not None:
+        return np.asarray([_int_to_str(int(c)) for c in cells], dtype=object)
+    return np.asarray([format(int(c), 'x') for c in cells], dtype=object)
 
-                # Validate coordinates are in reasonable range for Chicago
-                if not (40.0 <= lat_float <= 43.0 and -89.0 <= lon_float <= -86.0):
-                    # Use NA for missing/invalid h3 instead of a magic string
-                    h3_ids.append(pd.NA)
-                    continue
 
-                # Use modern API if available, fallback otherwise
-                if h3 is None:
-                    h3_ids.append(pd.NA)
-                else:
-                    try:
-                        h3_id = h3.latlng_to_cell(lat_float, lon_float, res) if hasattr(h3, 'latlng_to_cell') else h3.geo_to_h3(lat_float, lon_float, res)
-                        h3_ids.append(h3_id)
-                        success_count += 1
-                    except Exception as e:
-                        logger.debug(f"H3 generation error for idx {idx}: {e}")
-                        h3_ids.append(pd.NA)
-
-            except Exception as e:
-                logger.debug(f"H3 failed for row {idx}: lat={lat}, lon={lon}, error={e}")
-                h3_ids.append(pd.NA)
-        else:
-            h3_ids.append(pd.NA)
-
+def _assign_h3(df: pd.DataFrame, res: int, *, chunk_size: int = 50_000) -> pd.Series:
+    """Assign H3 hexagon IDs in batches to minimise Python-loop overhead."""
     total_records = len(df)
-    success_rate = (success_count / total_records) * 100 if total_records > 0 else 0
-    logger.info(f"H3 assignment: {success_count:,}/{total_records:,} successful ({success_rate:.1f}%)")
+    if total_records == 0 or h3 is None:
+        return pd.Series([pd.NA] * total_records, dtype='string', index=df.index)
 
-    # Return pandas string dtype so missing values are explicit <NA>
-    return pd.Series(h3_ids, index=df.index, dtype='string')
+    lat = pd.to_numeric(df.get('latitude'), errors='coerce').to_numpy()
+    lon = pd.to_numeric(df.get('longitude'), errors='coerce').to_numpy()
+
+    valid_mask = (
+        np.isfinite(lat) & np.isfinite(lon)
+        & (40.0 <= lat) & (lat <= 43.0)
+        & (-89.0 <= lon) & (lon <= -86.0)
+    )
+
+    result: np.ndarray = np.full(total_records, pd.NA, dtype=object)
+    valid_lat = lat[valid_mask]
+    valid_lon = lon[valid_mask]
+    n_valid = valid_lat.size
+
+    if n_valid == 0:
+        logger.info('H3 assignment: 0/%s successful (0.0%%)', f"{total_records:,}")
+        return pd.Series(result, index=df.index, dtype='string')
+
+    assigned_cells: np.ndarray
+    try:
+        if vectorized_latlng_to_cell is not None:
+            assigned_cells = _cells_to_str(vectorized_latlng_to_cell(valid_lat, valid_lon, res))
+        else:
+            # Fall back to chunked scalar calls to avoid per-row logging overhead.
+            cells = []
+            for start in range(0, n_valid, chunk_size):
+                stop = start + chunk_size
+                chunk_lat = valid_lat[start:stop]
+                chunk_lon = valid_lon[start:stop]
+                cells.extend(
+                    (h3.latlng_to_cell(lat_val, lon_val, res)
+                     if hasattr(h3, 'latlng_to_cell')
+                     else h3.geo_to_h3(lat_val, lon_val, res))
+                    for lat_val, lon_val in zip(chunk_lat, chunk_lon)
+                )
+            assigned_cells = np.asarray(cells, dtype=object)
+    except Exception as exc:
+        logger.error('Vectorised H3 assignment failed at r%s: %s', res, exc)
+        return pd.Series(result, index=df.index, dtype='string')
+
+    result[valid_mask] = assigned_cells
+    success_rate = (n_valid / total_records) * 100
+    logger.info('H3 assignment: %s/%s successful (%.1f%%) for r%s',
+                f"{n_valid:,}", f"{total_records:,}", success_rate, res)
+
+    return pd.Series(result, index=df.index, dtype='string')
+
+
+def _derive_parent_cells(base: pd.Series, base_res: int, target_res: int) -> Optional[pd.Series]:
+    """Derive coarser-resolution H3 cells from a higher-resolution series."""
+    if target_res == base_res:
+        return base.copy()
+    if _cell_to_parent is None or h3 is None:
+        return None
+
+    parents = []
+    for cell in base.astype('object'):
+        if pd.isna(cell):
+            parents.append(pd.NA)
+            continue
+        try:
+            parents.append(_cell_to_parent(cell, target_res))
+        except Exception as exc:
+            logger.debug('Failed to derive parent for %s → r%s: %s', cell, target_res, exc)
+            parents.append(pd.NA)
+    return pd.Series(parents, index=base.index, dtype='string')
 
 
 def _handle_missing_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -188,7 +245,7 @@ def _sanitize_and_cast_for_parquet(df: pd.DataFrame, h3_res: int) -> pd.DataFram
     """
     # Convert any categorical columns to string to avoid dictionary encodings
     for col in df.columns:
-        if pd.api.types.is_categorical_dtype(df[col].dtype):
+        if isinstance(df[col].dtype, CategoricalDtype):
             df[col] = df[col].astype('string')
 
     # Temporal columns
@@ -230,6 +287,9 @@ def _sanitize_and_cast_for_parquet(df: pd.DataFrame, h3_res: int) -> pd.DataFram
         df['street_norm'] = df['street_norm'].astype('string')
     else:
         df['street_norm'] = pd.Series([pd.NA] * len(df), dtype='string')
+
+    if 'crime_category' in df.columns:
+        df['crime_category'] = df['crime_category'].astype('string')
 
     # Ensure boolean columns are proper booleans or pandas boolean dtype
     bool_cols = ['is_weekend', 'arrest_made', 'is_domestic']
@@ -275,6 +335,14 @@ def _process_partition(part_dir: Path, h3_res: int) -> Optional[pd.DataFrame]:
         else:
             raise DataProcessingError('No datetime or created_date column present in L1')
 
+    if 'primary_type' not in df.columns and 'crime_type' in df.columns:
+        df['primary_type'] = df['crime_type']
+    if 'primary_type' in df.columns:
+        df['primary_type'] = df['primary_type'].astype('string')
+        df['crime_category'] = df['primary_type'].map(categorize_primary_type).astype('string')
+    else:
+        df['crime_category'] = pd.Series(['Unclassified'] * len(df), dtype='string')
+
     # Temporal features
     df['hour'] = df['datetime'].dt.hour
     df['day_of_week'] = df['datetime'].dt.dayofweek
@@ -301,30 +369,32 @@ def _process_partition(part_dir: Path, h3_res: int) -> Optional[pd.DataFrame]:
         logger.warning("No block_address or block column found - skipping street normalization")
         df['street_norm'] = 'UNKNOWN'
 
-    # H3 assignment (coordinates are guaranteed to be non-null after missing data handling)
+    base_res = max(H3_RESOLUTIONS)
+    base_col = f'h3_r{base_res}'
+
     if 'latitude' in df.columns and 'longitude' in df.columns:
         try:
-            df[f'h3_r{h3_res}'] = _assign_h3(df, h3_res)
+            df[base_col] = _assign_h3(df, base_res)
         except Exception as e:
-            logger.error(f"H3 assignment failed: {e}")
-            df[f'h3_r{h3_res}'] = pd.Series([pd.NA] * len(df), dtype='string')
+            logger.error(f"H3 assignment failed at r{base_res}: {e}")
+            df[base_col] = pd.Series([pd.NA] * len(df), dtype='string')
     else:
         logger.error("Missing latitude/longitude columns - cannot assign H3")
-        df[f'h3_r{h3_res}'] = pd.Series([pd.NA] * len(df), dtype='string')
+        df[base_col] = pd.Series([pd.NA] * len(df), dtype='string')
 
-    # Materialize all configured H3 resolutions directly from coordinates.
-    # Some h3 package builds don't expose a parent function (h3_to_parent),
-    # so recomputing by resolution is more portable and deterministic.
     for res in H3_RESOLUTIONS:
-        col = f'h3_r{res}'
-        if col in df.columns:
+        if res == base_res:
             continue
-        try:
-            # _assign_h3 returns a string-dtyped Series with pd.NA for missing
-            df[col] = _assign_h3(df, res)
-        except Exception as e:
-            logger.warning(f"Failed assigning h3 at resolution {res}: {e}")
-            df[col] = pd.Series([pd.NA] * len(df), dtype='string')
+        target_col = f'h3_r{res}'
+        derived = _derive_parent_cells(df[base_col], base_res, res)
+        if derived is not None:
+            df[target_col] = derived
+        else:
+            try:
+                df[target_col] = _assign_h3(df, res)
+            except Exception as e:
+                logger.warning(f"Failed assigning h3 at resolution {res}: {e}")
+                df[target_col] = pd.Series([pd.NA] * len(df), dtype='string')
 
     # Sanitize and enforce deterministic dtypes before returning/writing
     df = _sanitize_and_cast_for_parquet(df, h3_res)

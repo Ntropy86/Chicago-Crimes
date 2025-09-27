@@ -9,7 +9,7 @@ import os
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from l2_features import _sanitize_and_cast_for_parquet, _assign_h3, _normalize_street, _cyclical_encode
-from l3_multiscale import aggregate_daily, aggregate_monthly  # assuming these are functions in l3_multiscale.py
+from l3_multiscale import aggregate_daily_counts, aggregate_monthly_counts
 
 # Test data
 @pytest.fixture
@@ -41,6 +41,7 @@ class TestSanitizer:
         assert result['arrest_made'].dtype == 'boolean'
         assert result['beat_id'].dtype == 'Int64'
         assert result['h3_r9'].dtype == 'string'
+        assert 'crime_category' in result.columns
 
     def test_normalize_street(self):
         series = pd.Series(['012XX W SOME ST', '045XX N OTHER AVE', '1000 E MAIN RD'])
@@ -80,14 +81,12 @@ class TestH3Assignment:
 
 class TestAggregator:
     def test_aggregate_daily(self):
-        # Mock L2 data
         df = pd.DataFrame({
             'h3_r9': ['8928308280fffff', '8928308280fffff', '89283082807ffff'],
             'date': pd.to_datetime(['2023-01-01', '2023-01-01', '2023-01-02']),
-            'arrest_made': [True, False, True],
-            'n_crimes': [1, 1, 1]
+            'arrest_made': [True, False, True]
         })
-        result = aggregate_daily(df, 'h3_r9', 'arrest_made')
+        result = aggregate_daily_counts(df, 'h3_r9', 'arrest_made')
         assert len(result) > 0
         assert 'h3_r9' in result.columns
         assert 'date' in result.columns
@@ -95,14 +94,13 @@ class TestAggregator:
         assert 'n_arrests' in result.columns
 
     def test_aggregate_monthly(self):
-        # Similar to daily
         df = pd.DataFrame({
-            'h3_r9': ['8928308280fffff', '8928308280fffff'],
-            'date': pd.to_datetime(['2023-01-01', '2023-01-15']),
-            'arrest_made': [True, False],
-            'n_crimes': [1, 1]
+            'h3_r9': ['8928308280fffff', '8928308280fffff', '89283082807ffff'],
+            'date': pd.to_datetime(['2023-01-01', '2023-01-01', '2023-01-15']),
+            'arrest_made': [True, False, True]
         })
-        result = aggregate_monthly(df, 'h3_r9', 'arrest_made')
+        daily = aggregate_daily_counts(df, 'h3_r9', 'arrest_made')
+        result = aggregate_monthly_counts(daily, 'h3_r9')
         assert len(result) > 0
         assert 'h3_r9' in result.columns
         assert 'month' in result.columns

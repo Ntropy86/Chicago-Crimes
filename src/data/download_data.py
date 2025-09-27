@@ -13,17 +13,20 @@ Note:
 
 
 import sys
+import json
+import threading
 from urllib import response
 from numpy import full
 import requests
 import os
 from io import StringIO
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Set
 from datetime import date, datetime
 from dotenv import load_dotenv
 import time
 import pandas as pd
 import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
@@ -100,6 +103,14 @@ class ChicagoCrimeDatasetDownloader:
         self.rate_limit = rate_limit
         self.batch_size = batch_size
         self.max_workers = max_workers
+        self.parallelism = max(1, min(max_workers, 4))
+        self.base_backoff = max(rate_limit, 0.1)
+
+        self.app_token = os.getenv('SODA_APP_TOKEN') or os.getenv('CHICAGO_DATA_TOKEN')
+        self._session_local = threading.local()
+
+        self.checkpoint_path = Path('data/temp/.download_checkpoint.json')
+        self.completed_months: Set[str] = self._load_checkpoints()
 
         # Create the Directories Required 
         self._create_directories()
@@ -137,6 +148,15 @@ class ChicagoCrimeDatasetDownloader:
         
         return f'?$where=date>="{start_date.strftime("%Y-%m-%d")}" AND date < "{end_date.strftime("%Y-%m-%d")}"'
 
+    def _get_session(self) -> requests.Session:
+        session = getattr(self._session_local, 'session', None)
+        if session is None:
+            session = requests.Session()
+            if self.app_token:
+                session.headers.update({'X-App-Token': self.app_token})
+            self._session_local.session = session
+        return session
+
     def _make_request(
             self,
             query:str,
@@ -158,27 +178,29 @@ class ChicagoCrimeDatasetDownloader:
 
         full_url = f"{self.URL}{query}&$limit={self.batch_size}&$offset={offset}"
     
+        session = self._get_session()
+
         for attempt in range(retries):
             try:
                 logger.debug(f'Requesting: {full_url}')
-                response = requests.get(full_url, timeout=30)
+                response = session.get(full_url, timeout=30)
 
                 if response.status_code == 200:
                     return response
                 
                 elif response.status_code == 429:  # Rate limit
-                    wait_time = min((attempt + 1) * self.rate_limit * 2, 60)
+                    wait_time = min((attempt + 1) * self.base_backoff * 2, 60)
                     logger.warning(f'Rate Limit Exceeded, waiting for {wait_time}s')
                     time.sleep(wait_time)
                 else:
                     logger.error(f'Request failed with status {response.status_code}: {response.text}')
-                    time.sleep(self.rate_limit * (attempt + 1))  # Progressive backoff
+                    time.sleep(self.base_backoff * (attempt + 1))  # Progressive backoff
 
             except requests.exceptions.RequestException as e:
                 logger.error(f'Network error (attempt {attempt + 1}): {str(e)}')
                 if attempt == retries - 1:
                     raise DatasetDownloadError(f'Network error after {retries} attempts: {str(e)}')
-                time.sleep(self.rate_limit * (attempt + 1))
+                time.sleep(self.base_backoff * (attempt + 1))
         
         return None
     
@@ -216,7 +238,7 @@ class ChicagoCrimeDatasetDownloader:
                 monthly_chunks.append(chunk_df)
                 total_records += len(chunk_df)
                 offset += self.batch_size
-                time.sleep(self.rate_limit)
+                time.sleep(self.base_backoff)
 
             # Save the data - OUTSIDE the while loop
             if monthly_chunks:  # Only try to save if we got any data
@@ -225,6 +247,7 @@ class ChicagoCrimeDatasetDownloader:
                     temp_path = f'data/temp/chicago_crimes_{year}_{month:02d}.csv'
                     monthly_df.to_csv(temp_path, index=False)
                     logger.info(f"Saved {total_records} records for {year}-{month:02d}")
+                    self._mark_checkpoint(year, month)
                 except Exception as e:
                     logger.error(f"Failed to save data for {year}-{month:02d}: {str(e)}")
                     raise
@@ -276,6 +299,44 @@ class ChicagoCrimeDatasetDownloader:
             logger.error(f"Failed to process year {year}: {str(e)}")
             raise DatasetDownloadError(f"Failed to process year {year}: {str(e)}")
     
+    def _load_checkpoints(self) -> Set[str]:
+        if self.checkpoint_path.exists():
+            try:
+                with self.checkpoint_path.open('r', encoding='utf-8') as fh:
+                    data = json.load(fh)
+                return set(data)
+            except Exception as exc:
+                logger.warning(f'Checkpoint file unreadable: {exc}; starting fresh')
+        return set()
+
+    def _mark_checkpoint(self, year: int, month: int) -> None:
+        key = f'{year}-{month:02d}'
+        if key in self.completed_months:
+            return
+        self.completed_months.add(key)
+        try:
+            self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.checkpoint_path.open('w', encoding='utf-8') as fh:
+                json.dump(sorted(self.completed_months), fh)
+        except Exception as exc:
+            logger.warning(f'Failed to persist checkpoint {key}: {exc}')
+
+    def _is_month_complete(self, year: int, month: int) -> bool:
+        key = f'{year}-{month:02d}'
+        if key in self.completed_months:
+            return True
+        temp_file = Path('data/temp') / f'chicago_crimes_{year}_{month:02d}.csv'
+        if temp_file.exists():
+            return True
+        yearly_file = Path('data/raw') / f'chicago_crimes_{year}.csv'
+        if yearly_file.exists():
+            try:
+                with yearly_file.open('r') as _:
+                    return True
+            except Exception:
+                return False
+        return False
+
     def _download_dataset(self) -> None:
         """
         Downloads the Chicago Crime Dataset for all the years from start_year till present
@@ -288,21 +349,25 @@ class ChicagoCrimeDatasetDownloader:
                 (year, month)
                 for year in range(self.start_year, current_year + 1)
                 for month in range(1, 13)
+                if not self._is_month_complete(year, month)
             ]
 
-            # Process in batches to control concurrent requests
-            batch_size = min(self.max_workers * 2, len(download_tasks))  # Control batch size
-            for i in range(0, len(download_tasks), batch_size):
-                batch = download_tasks[i:i + batch_size]
-                
-                with mp.Pool(self.max_workers) as pool:
-                    # Use map for synchronous execution - more controlled than apply_async
-                    pool.map(self._download_month_data, batch)
-                    pool.close()
-                    pool.join()
-                
-                logger.info(f"Completed batch {i//batch_size + 1} of {(len(download_tasks) + batch_size - 1)//batch_size}")
-                time.sleep(self.rate_limit)  # Rate limit between batches
+            if not download_tasks:
+                logger.info('All monthly partitions already downloaded – skipping fetch stage')
+            else:
+                total_batches = max(1, (len(download_tasks) + self.parallelism - 1) // self.parallelism)
+                logger.info(f'Fetching {len(download_tasks)} month partitions across {total_batches} batches (parallelism={self.parallelism})')
+
+                with ThreadPoolExecutor(max_workers=self.parallelism) as executor:
+                    futures = {executor.submit(self._download_month_data, ym): ym for ym in download_tasks}
+                    for idx, future in enumerate(as_completed(futures), start=1):
+                        year, month = futures[future]
+                        try:
+                            future.result()
+                        except Exception as exc:
+                            logger.error(f'Month download failed for {year}-{month:02d}: {exc}')
+                        if idx % self.parallelism == 0:
+                            time.sleep(self.base_backoff)
 
             # Process years only after all months are downloaded
             successful_years = []
@@ -376,5 +441,4 @@ if __name__ == '__main__':
         exit(1)
 
         
-
 

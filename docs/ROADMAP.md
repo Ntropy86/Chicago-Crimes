@@ -4,9 +4,13 @@ This roadmap captures the planned extensions beyond the currently shipping L1 �
 
 ## 1. Hotspot Storytelling (Baseline **shipped**)
 
-- **Delivered**: Streamlit dashboard (`app.py`) and notebook (`notebooks/01_hotspot_storytelling.ipynb`) showing daily trends, H3 hotspot maps, low-confidence flags, and optional clustering overlay.
-- **Next Enhancements**: Add drill-down filters (crime type, arrest flag) and narrative export for weekly reporting.
-- **Intern Learning Focus**: Capture qualitative insights, evaluate deterministic vs. HDBSCAN differences, and log follow-up questions for stakeholders.
+- **Delivered**: Streamlit dashboard (`app.py`) and notebook (`notebooks/01_hotspot_storytelling.ipynb`) with sidebar taxonomy filters, multi-month selection, legends, and optional clustering overlay.
+- **Next Enhancements**:
+  - Drill-down workflow: click a hex to focus KPI cards and trend charts on that area, with breadcrumbs to step back out.
+  - Palette manager: metric-aware colour scales (volume, arrest %, clearance) with inline legends and accessibility checks.
+  - Hex resolution explorer: support r6 and finer (r10+) where data density allows; warn when selections become too sparse.
+  - Narrative export for weekly reporting (Markdown/PDF) using the taxonomy summaries.
+- **Intern Learning Focus**: Usability research, interactive Plotly callbacks (selection events), and communicating statistical confidence to non-technical partners.
 
 ## 2. Forecasting Engine (Post-demo)
 
@@ -31,10 +35,10 @@ This roadmap captures the planned extensions beyond the currently shipping L1 �
 
 ## 4. Production-Quality Visual Platform (Mid term)
 
-- **Goal**: Promote notebooks to an interactive dashboard (Streamlit/Bokeh/Plotly Dash) telling an “Insights per Month” story.
-- **Prereqs**: Hotspot storytelling assets, stable forecasting outputs, census enrichment.
-- **Deliverables**: MVP app with tabs for current hotspots, forecast scenarios, and demographic overlays; deployable locally.
-- **Intern Learning Focus**: UX for analytics, transforming exploratory code into maintainable modules, stakeholder storytelling.
+- **Goal**: Promote notebooks to an interactive dashboard (Streamlit/Bokeh/Plotly Dash) telling an “Insights per Month” story with drill-down capabilities.
+- **Prereqs**: Hotspot storytelling upgrades above, stable forecasting outputs, census enrichment, and documented UX heuristics.
+- **Deliverables**: MVP app with tabs for hotspots, forecast scenarios, demographic overlays, plus deterministic export artefacts (PDF/CSV bundles).
+- **Intern Learning Focus**: UX for analytics, managing session state in interactive apps, translating stakeholder feedback into design iterations.
 
 ## 5. Agentic Exploration (Stretch goal)
 
@@ -50,4 +54,4 @@ This roadmap captures the planned extensions beyond the currently shipping L1 �
 3. **Feedback loops** – after each milestone, capture lessons learned and update this roadmap (scope changes, new dependencies).
 4. **Learning Mindset** – treat each initiative as a coaching ladder: read existing pipeline code, replicate outputs, then extend.
 
-_Last updated: 2025-09-26_
+_Last updated: 2025-09-27_
