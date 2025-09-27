@@ -167,3 +167,4 @@ hdbscan==0.8.33
 holidays==0.56
 pytest==8.3.4
 streamlit==1.40.1
+streamlit-plotly-events==0.0.6

@@ -10,12 +10,13 @@ Operational repository for the Chicago crimes medallion pipeline.
 - Streamlit hotspot app gained sidebar controls, multi-month selection, metric-aware colour palettes, and richer narratives.
 - Updated automated tests cover the new aggregation helpers and taxonomy mapping.
 - Added support for r6 (citywide) and r10 (micro-block) H3 resolutions; r10 is exposed with a sparsity warning so analysts can decide when the granularity is useful.
+- Streamlit dashboard now supports interactive drill-down—click a hex to zoom one resolution deeper with breadcrumbs and KPI re-scoping.
 
 ## Current Processing Status (2025-09-26)
 
 - **L1 Bronze**: Raw CSVs stored under `data/raw/`, standardized parquet partitions under `data/l1/`.
-- **L2 Silver**: Feature-enriched parquet partitions with H3 identifiers (r7/r8/r9) under `data/l2/year=YYYY/month=MM/`.
-- **L3 Gold**: Deterministic daily and monthly aggregates for r7/r8/r9 under `data/l3/res={res}/year=YYYY/month=MM/`.
+- **L2 Silver**: Feature-enriched parquet partitions with H3 identifiers (r6→r10) under `data/l2/year=YYYY/month=MM/`.
+- **L3 Gold**: Deterministic daily and monthly aggregates for r6→r10 under `data/l3/res={res}/year=YYYY/month=MM/`.
 
 ## Runbooks
 
@@ -36,6 +37,11 @@ python3 src/l3_multiscale.py [year] [month]
 ```
 
 - Provide year/month to scope work; omit to process all partitions.
+- After L3 finishes, refresh the drill-down mapping that powers the Streamlit click interactions:
+
+```bash
+python scripts/precompute_h3_drilldown.py
+```
 
 ### Run clustering prototype (UMAP + HDBSCAN)
 
@@ -56,6 +62,7 @@ streamlit run app.py
 - Hex colour defaults to incident volume; when you apply a filter it swaps to “Selected incident volume” so red/green reflects your current focus. Arrest-rate metrics invert the palette (more arrests = greener) for clarity.
 - Legends and “Quick hits” narratives refresh automatically to describe the active metric and top hotspots.
 - Optional checkbox reruns the clustering prototype for each selected month (results land under `data/l3/clusters/`).
+- Click a hex to drill one level deeper (r6→r7 … r9→r10); breadcrumbs and KPI cards update to the selected area, with “Step back” and “Reset view” buttons in the sidebar.
 
 ### Notebook for deeper analysis
 
@@ -102,6 +109,7 @@ Key packages are pinned in `requirements.txt`. Notable extras:
 - `h3` – spatial hex indexing (required for L2/L3)
 - `hdbscan` – clustering backend (prototype)
 - `umap-learn` – dimensionality reduction (prototype)
+- `streamlit-plotly-events` – capture Plotly click events for drill-down UX
 
 Install optional extras on demand, e.g. `pip install umap-learn`.
 
