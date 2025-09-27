@@ -1,325 +1,122 @@
 # Chicago Crimes
 
-Repository for Chicago crimes medallion pipeline.
-## Current processing status (as of 2025-09-26)
+Operational repository for the Chicago crimes medallion pipeline.
 
-- L1: Raw CSVs are stored under `data/raw/` and L1 parquet partitions are under `data/l1/`.
-- L2: Features have been re-run and now materialize H3 identifiers at resolutions r7, r8 and r9.
-   - L2 parquet files: `data/l2/year=YYYY/month=MM/features-YYYY-MM.parquet`.
-   - H3 columns in L2: `h3_r7`, `h3_r8`, `h3_r9` (pandas `string` dtype, `pd.NA` for invalid/missing).
-- L3: Deterministic daily and monthly aggregates were generated for res=7/8/9 and are stored under `data/l3/res={res}/year=YYYY/month=MM/`.
+## Current Processing Status (2025-09-26)
 
-## How to re-run pipelines
+- **L1 Bronze**: Raw CSVs stored under `data/raw/`, standardized parquet partitions under `data/l1/`.
+- **L2 Silver**: Feature-enriched parquet partitions with H3 identifiers (r7/r8/r9) under `data/l2/year=YYYY/month=MM/`.
+- **L3 Gold**: Deterministic daily and monthly aggregates for r7/r8/r9 under `data/l3/res={res}/year=YYYY/month=MM/`.
 
-All commands assume you are in the repository root and using the project's Python environment.
+## Runbooks
 
-Re-run L2 (L1 -> L2):
+All commands assume repository root and an activated project environment.
 
-```bash
-python3 src/l2_features.py
-```
-
-Re-run deterministic L3 aggregator (reads L2 partitions and writes per-resolution daily/monthly parquet):
+### Rebuild L2 (L1 → L2)
 
 ```bash
-python3 src/l3_multiscale.py
+python3 src/l2_features.py [start_year]
 ```
 
-Run the clustering prototype (UMAP + HDBSCAN) for a specific year/month (example: 2024-09):
+- Optional `start_year` (YYYY) skips older partitions. Omit to process every available year.
+
+### Rebuild deterministic L3 aggregates
 
 ```bash
-python3 src/l3_clustering_prototype.py 2024 09
+python3 src/l3_multiscale.py [year] [month]
 ```
 
-## Quick smoke-checks
+- Provide year/month to scope work; omit to process all partitions.
 
-Check sample L2 partition contains H3 columns and sample L3 file exists:
+### Run clustering prototype (UMAP + HDBSCAN)
+
+```bash
+python3 src/l3_clustering_prototype.py YEAR MONTH
+```
+
+- Requires `umap-learn` and `hdbscan` installed.
+
+### Launch hotspot dashboard (Streamlit)
+
+```bash
+streamlit run app.py
+```
+
+- The dashboard uses L3 aggregates to plot daily trends, H3 hotspot maps, and highlight low-confidence cells.
+- Optional checkbox reruns the clustering prototype for the selected month.
+
+### Notebook for deeper analysis
+
+- `notebooks/01_hotspot_storytelling.ipynb` mirrors the dashboard logic with additional cells for ad-hoc exploration.
+
+## Smoke Checks
+
+Run this quick verification to confirm a representative L2/L3 partition:
 
 ```bash
 python3 - <<'PY'
-import pyarrow.parquet as pq
 import pandas as pd
-import sys
 from pathlib import Path
 
-sample = Path('data/l2/year=2024/month=09/features-2024-09.parquet')
-if sample.exists():
-      df = pd.read_parquet(sample)
-      print('L2 cols:', ','.join(df.columns[:20]))
-      for c in ['h3_r7','h3_r8','h3_r9']:
-            print(c, 'in L2?', c in df.columns)
+l2_sample = Path('data/l2/year=2024/month=09/features-2024-09.parquet')
+if l2_sample.exists():
+    df = pd.read_parquet(l2_sample)
+    print('L2 columns:', ', '.join(df.columns[:20]))
+    for col in ['h3_r7', 'h3_r8', 'h3_r9']:
+        print(col, 'present?', col in df.columns)
 else:
-      print('L2 sample not found:', sample)
+    print('Missing L2 sample', l2_sample)
 
-sample_l3 = Path('data/l3/res=9/year=2024/month=09/l3-aggregates-9-2024-09.parquet')
-print('L3 sample exists?', sample_l3.exists())
+l3_sample = Path('data/l3/res=9/year=2024/month=09/l3-aggregates-9-2024-09.parquet')
+print('L3 sample exists?', l3_sample.exists())
 PY
 ```
 
 ## Dependencies
 
-Primary requirements are listed in `requirements.txt`. Notable extras used by the prototypes:
+Key packages are pinned in `requirements.txt`. Notable extras:
 
-- `h3` (H3 spatial index Python binding)
-- `hdbscan` (clustering)
-- `umap-learn` (optional, used by the clustering prototype; add to requirements if you want to run clustering)
+- `h3` – spatial hex indexing (required for L2/L3)
+- `hdbscan` – clustering backend (prototype)
+- `umap-learn` – dimensionality reduction (prototype)
 
-To install extras:
+Install optional extras on demand, e.g. `pip install umap-learn`.
 
-```bash
-pip install umap-learn
-```
+## Maintenance Notes
 
-## Notes and maintenance
+- L2 writes deterministic parquet schemas (no pandas `category`, timestamps normalized to `datetime64[ns]`).
+- H3 assignment guards against API differences (`latlng_to_cell` vs `geo_to_h3`) and missing libraries.
+- L3 aggregation tolerates alternate column names (e.g., `arrest` vs `arrest_made`).
 
-- The L2 writer enforces deterministic parquet schema (no pandas `category` dtype; dates normalized to `datetime64[ns]`) to avoid dataset schema merge problems across row-groups.
-- H3 assignment code is robust to different Python `h3` bindings (detects `geo_to_h3` vs `latlng_to_cell` and falls back safely).
-- The L3 aggregator is tolerant to alternate column names (e.g., alternate arrest flag names) and will fall back to safe defaults when fields are missing.
+### Recent Fixes
 
-If you want a short automated smoke-check or unit tests added to the repo, tell me which checks you prefer and I'll add them and run them.
-# Chicago Crime Data Forecasting & Hotspot Analysis with AI Agent
+- Casted coordinates to floats to avoid `H3ResDomainError`; per-row failures now resolve to `<NA>`.
+- Normalized street names even when L1 exports `block` instead of `block_address`.
+- Clarified CLI: `src/l2_features.py` treats the first argument as `start_year`; it does **not** change H3 resolution.
 
-## Project Overview
-This graduate-level Data Science project focuses on developing an advanced crime analysis and prediction system for Chicago using hybrid modeling approaches, machine learning techniques, and an intelligent AI agent. The project combines time series forecasting with spatial clustering and implements an agentic approach that allows users to interact with crime data through natural language queries, automatically generating SQL queries and visualizations.
+### Quick Validation Runs
 
-## Objectives
-1. Implement Medallion Architecture (Bronze → Silver → Gold) for robust data engineering
-2. Develop a hybrid ARIMA+LSTM model for accurate crime incident forecasting
-3. Implement spatial clustering using DBSCAN to identify high-risk zones
-4. Build an AI Agent with natural language to SQL capabilities using semantic search
-5. Create interactive visualizations with agent integration for crime hotspot analysis
-6. Deploy the solution using AWS EMR for scalable processing
-7. Provide actionable insights for law enforcement resource allocation through conversational AI
+- Full L2 rebuild from 2018 → 2025-08 validated `h3_r9`, cyclical encodings, and `street_norm` columns.
+- Deterministic L3 aggregates exist for r7/r8/r9 and read back without schema drift.
 
-## Technical Architecture
-- **Data Engineering**: Medallion Architecture (Bronze/Silver/Gold layers) with PySpark
-- **Time Series Forecasting**: Hybrid ARIMA+LSTM model
-- **Spatial Analysis**: DBSCAN clustering for hotspot detection
-- **AI Agent**: LangChain + OpenAI for natural language processing
-- **Vector Database**: ChromaDB for semantic search capabilities
-- **Graph Database**: Neo4j for knowledge representation and relationships
-- **SQL Generation**: Text-to-SQL with semantic understanding
-- **Cloud Infrastructure**: AWS EMR with automated deployment
-- **Visualization**: Interactive Plotly dashboards with agent integration
-- **Version Control**: Git/GitHub with CI/CD pipeline
-
-## Data Sources
-- Chicago Police Department's CLEAR (Citizen Law Enforcement Analysis and Reporting) system
-- Chicago Data Portal (https://data.cityofchicago.org/Public-Safety/Crimes-2001-to-Present/ijzp-q8t2)
-- Census demographic data for contextual analysis
-
-## Methodology
-
-### Phase 1: Data Engineering (Medallion Architecture)
-1. **Bronze Layer**: Raw data ingestion with basic validation
-   - Historical crime data extraction from Chicago Open Data Portal
-   - Data quality checks and schema validation
-   - Incremental data loading capabilities
-
-2. **Silver Layer**: Cleaned and standardized data
-   - Data cleaning and feature engineering
-   - Temporal and spatial feature creation
-   - Data type standardization and null handling
-
-3. **Gold Layer**: Business-ready aggregated datasets
-   - Monthly crime aggregations for forecasting
-   - Spatial clustering results for hotspot analysis
-   - Feature-rich datasets optimized for ML and analytics
-
-### Phase 2: Machine Learning & AI Agent
-4. **Time Series Analysis**
-   - ARIMA modeling for linear patterns
-   - LSTM implementation for non-linear patterns
-   - Hybrid model development and optimization
-
-5. **Spatial Analysis**
-   - DBSCAN clustering for hotspot detection
-   - Geographic boundary consideration
-   - Temporal-spatial correlation analysis
-
-6. **AI Agent Development**
-   - Vector database setup for semantic search
-   - Graph database for knowledge representation
-   - Natural language to SQL query generation
-   - Conversational interface for data exploration
-
-### Phase 3: Visualization & Deployment
-7. **Interactive Dashboards**
-   - Agent-integrated Plotly visualizations
-   - Natural language query interface
-   - Automated chart generation based on user questions
-
-8. **Cloud Deployment**
-   - AWS EMR cluster setup
-   - CI/CD pipeline implementation
-   - Scalable infrastructure for production use
-
-## Expected Outcomes
-- Monthly crime incident forecasts with 85%+ accuracy
-- Identified high-risk zones with temporal patterns
-- Interactive visualization dashboard
-- Automated reporting system
-- 30% reduction in manual analysis time
-
-## Project Timeline
-- Week 1-2: Data collection and preprocessing
-- Week 3-4: ARIMA+LSTM model development
-- Week 5-6: DBSCAN implementation and spatial analysis
-- Week 7-8: AWS EMR setup and deployment
-- Week 9-10: Dashboard development and testing
-- Week 11-12: Documentation and final presentation
-
-## Required Technologies
-
-### Core Data & ML Stack
-- Python 3.10+
-- PySpark for distributed processing
-- TensorFlow/Keras for deep learning
-- Scikit-learn for traditional ML
-- Statsmodels for time series analysis
-
-### AI Agent & Database Stack
-- LangChain for AI agent orchestration
-- OpenAI API for natural language processing
-- ChromaDB for vector storage and semantic search
-- Neo4j for graph database and knowledge representation
-- SQLAlchemy for database ORM
-
-### Visualization & Deployment
-- Plotly for interactive visualizations
-- Streamlit for web interface
-- AWS EMR for cloud processing
-- Docker for containerization
-- GitHub Actions for CI/CD
-- Git for version control
-
-## Installation and Setup
-
-### Prerequisites
-```bash
-# Create a virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install required packages
-pip install -r requirements.txt
-```
-
-### AWS EMR Setup
-1. Configure AWS CLI
-2. Set up EMR cluster
-3. Configure security groups and IAM roles
-
-## Project Structure (Medallion Architecture)
-```
-chicago-crime-analysis/
-├── data/
-│   ├── bronze/          # Raw data layer
-│   ├── silver/          # Cleaned data layer
-│   └── gold/            # Business-ready aggregated data
-├── notebooks/
-│   ├── 01_exploratory_analysis.ipynb
-│   ├── 02_arima_modeling.ipynb
-│   ├── 03_lstm_modeling.ipynb
-│   └── 04_spatial_analysis.ipynb
-├── src/
-│   ├── data/            # Data engineering pipelines
-│   ├── models/          # ML models (ARIMA, LSTM, DBSCAN)
-│   ├── agent/           # AI agent components
-│   ├── visualization/   # Dashboard and plotting utilities
-│   ├── database/        # Vector & Graph DB utilities
-│   └── utils/           # Shared utilities
-├── tests/               # Unit and integration tests
-├── deployment/          # AWS EMR and Docker configs
-├── requirements.txt
-├── docker-compose.yml
-├── README.md
-└── .gitignore
-```
-
-## Getting Started
-1. Clone the repository
-```bash
-git clone https://github.com/[Ntropy86]/chicago-crime-analysis.git
-cd chicago-crime-analysis
-```
-
-2. Set up the environment
-```bash
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-3. Download the dataset
-```bash
-python -m src.data.download_data.py
-```
-
-## Contributing
-Please read CONTRIBUTING.md for details on our code of conduct and the process for submitting pull requests.
-
-## License
-This project is licensed under the MIT License - see the LICENSE.md file for details
-
-## Contact
-[Neat](<ADD Eastegg here>) - [kargeti@wisc.edu](mailto:kargeti@wisc.edu)
-Project Link: https://github.com/[Ntropy86]/chicago-crime-analysis
-
-## Bug fixes, notes and L2 CLI behavior
-
-### L2 bug fixes and notes
-- H3 assignment crash (H3ResDomainError) when running inside pandas DataFrame processing: fixed by explicitly casting latitude and longitude to Python floats when calling the C-extension `h3.latlng_to_cell`, and by adding safe per-row exception handling. Records that cannot be assigned an H3 index are now labeled `'UNKNOWN'` (but the fix reduced those to zero in sampled runs).
-- Street/block normalization mismatch: L1 sometimes stores street info under `block` while L2 expected `block_address`. L2 now falls back to `block` when `block_address` is missing and normalizes that value to `street_norm`.
-- L2 CLI `start_year` behavior: the first CLI argument to `src/l2_features.py` is treated as a start year (YYYY). The script processes all L1 partitions under `data/l1/year=YYYY` for all years >= start_year up through the latest available partition. Example: `python src/l2_features.py 2018` will process 2018, 2019, ..., up to the most recent year present in `data/l1`.
-
-### Quick verification performed
-- Ran full L2 from `2018` → latest available (2025/08) and wrote L2 outputs under `data/l2/year=.../month=.../features-YYYY-MM.parquet`.
-- Sampled files (2018-01, 2022-06, 2025-08) verified for required columns: `h3_r9`, `street_norm`, temporal features and cyclical encodings (hour_sin/hour_cos etc.). No H3 unknowns in those samples.
-
-If you want reproducible checks, a `--dry-run` flag is a low-risk addition I can add to `src/l2_features.py` to preview the partitions that would be processed without executing compute/writes.
-
-## Diagrams (Mermaid)
-
-### Overall ETL pipeline
+## Architecture Diagrams
 
 ```mermaid
 flowchart LR
-   RAW[Raw data (CSV)] --> L1[L1: Standardized Parquet]
-   L1 --> L2[L2: Feature Engineered Parquet]
-   L2 --> L3[L3: Aggregations / Model-ready]
-   L3 --> ML[ML Models & Forecasting]
-   ML --> Dashboard[Visualization / Agent]
-   subgraph Storage
-      RAW
-      L1
-      L2
-      L3
-   end
+   RAW[Raw data (CSV)] --> L1[L1 Bronze]
+   L1 --> L2[L2 Silver]
+   L2 --> L3[L3 Gold]
+   L3 --> Analytics[Dashboards / Modeling]
 ```
-
-### L1 pipeline (single-month partition)
 
 ```mermaid
 flowchart TD
-   raw_csv[raw CSV (chicago_crimes_YYYY.csv)] -->|column mapping & dtype coercion| l1_parquet[L1: part-YYYY-MM.parquet]
-   l1_parquet -->|partitioned by year/month| data_l1[data/l1/year=YYYY/month=MM]
-   note1[Notes: map 'block' -> 'block_address' when present]
-   raw_csv -.-> note1
+   raw_csv[Raw CSV chicago_crimes_YYYY.csv] -->|standardize| l1[L1 part-YYYY-MM.parquet]
+   l1 -->|year=YYYY/month=MM| l1_store[data/l1/...]
+   l1_store -->|feature engineering| l2[data/l2/...]
+   l2 -->|aggregations| l3[data/l3/...]
 ```
 
-### L2 pipeline (per partition)
+## Roadmap
 
-```mermaid
-flowchart LR
-   l1_partition[L1 month parquet] --> missing[Missing data handling & type fixes]
-   missing --> temporal[Temporal features & cyclical encodings]
-   missing --> street[Street normalization (block_address or block -> street_norm)]
-   street --> h3[H3 assignment (res=9) – safe casts & exception handling]
-   temporal --> features[Assemble features]
-   h3 --> features
-   features --> write[Write L2 features -> data/l2/year=YYYY/month=MM/features-YYYY-MM.parquet]
-
-   note2[Notes: H3 call uses Python float casting; failures -> 'UNKNOWN']
-   h3 -.-> note2
-```
+Future work—forecasting (ARIMA/LSTM/transformers), census enrichment, advanced clustering dashboards, and agentic exploration—is tracked in `docs/ROADMAP.md`. Those items are explicitly marked as **post-demo** so this README only reflects features that ship today.
