@@ -25,35 +25,11 @@ import os
 try:
     import h3
     h3_version = getattr(h3, '__version__', 'unknown')
-    # Direct H3 test
-    try:
-        test_h3 = h3.latlng_to_cell(41.977441, -87.839712, 9) if hasattr(h3, 'latlng_to_cell') else h3.geo_to_h3(41.977441, -87.839712, 9)
-        print(f'Direct H3 test (41.977441, -87.839712, 9): {test_h3}')
-    except Exception as e:
-        print(f'Direct H3 test failed: {e}')
 except Exception as e:
     h3 = None
     h3_version = f'not importable: {e}'
 
-print('=== ENV DIAGNOSTICS (l2_features.py) ===')
-print('sys.executable:', sys.executable)
-print('PYTHONPATH:', os.environ.get('PYTHONPATH', ''))
-print('h3 version:', h3_version)
-print('========================================')
-import sys
-import os
-try:
-    import h3
-    h3_version = getattr(h3, '__version__', 'unknown')
-except Exception as e:
-    h3 = None
-    h3_version = f'not importable: {e}'
-
-print('=== ENV DIAGNOSTICS (l2_features.py) ===')
-print('sys.executable:', sys.executable)
-print('PYTHONPATH:', os.environ.get('PYTHONPATH', ''))
-print('h3 version:', h3_version)
-print('========================================')
+# Minimal diagnostics go to logger after setup; avoid noisy prints on import.
 
 def setup_standalone_logger():
     os.makedirs('logs', exist_ok=True)
@@ -88,6 +64,9 @@ class ConfigError(Exception):
 L1_DIR = Path('data/l1')
 L2_DIR = Path('data/l2')
 
+# H3 resolutions to materialize at L2 (coarse -> fine). Keep small list to limit storage.
+H3_RESOLUTIONS = [7, 8, 9]
+
 
 def _ensure_dirs() -> None:
     try:
@@ -118,37 +97,46 @@ def _assign_h3(df: pd.DataFrame, res: int) -> pd.Series:
     # Process all coordinates with explicit type conversion
     h3_ids = []
     success_count = 0
-    
+
     for idx, row in df.iterrows():
-        lat = row['latitude']
-        lon = row['longitude']
-        
+        lat = row.get('latitude')
+        lon = row.get('longitude')
+
         if pd.notna(lat) and pd.notna(lon):
             try:
-                # Convert to Python float to avoid numpy precision issues
                 lat_float = float(lat)
                 lon_float = float(lon)
-                
+
                 # Validate coordinates are in reasonable range for Chicago
                 if not (40.0 <= lat_float <= 43.0 and -89.0 <= lon_float <= -86.0):
-                    h3_ids.append('UNKNOWN')
+                    # Use NA for missing/invalid h3 instead of a magic string
+                    h3_ids.append(pd.NA)
                     continue
-                    
-                h3_id = h3.latlng_to_cell(lat_float, lon_float, res)
-                h3_ids.append(h3_id)
-                success_count += 1
-                
+
+                # Use modern API if available, fallback otherwise
+                if h3 is None:
+                    h3_ids.append(pd.NA)
+                else:
+                    try:
+                        h3_id = h3.latlng_to_cell(lat_float, lon_float, res) if hasattr(h3, 'latlng_to_cell') else h3.geo_to_h3(lat_float, lon_float, res)
+                        h3_ids.append(h3_id)
+                        success_count += 1
+                    except Exception as e:
+                        logger.debug(f"H3 generation error for idx {idx}: {e}")
+                        h3_ids.append(pd.NA)
+
             except Exception as e:
                 logger.debug(f"H3 failed for row {idx}: lat={lat}, lon={lon}, error={e}")
-                h3_ids.append('UNKNOWN')
+                h3_ids.append(pd.NA)
         else:
-            h3_ids.append('UNKNOWN')
-    
+            h3_ids.append(pd.NA)
+
     total_records = len(df)
     success_rate = (success_count / total_records) * 100 if total_records > 0 else 0
     logger.info(f"H3 assignment: {success_count:,}/{total_records:,} successful ({success_rate:.1f}%)")
-    
-    return pd.Series(h3_ids, index=df.index)
+
+    # Return pandas string dtype so missing values are explicit <NA>
+    return pd.Series(h3_ids, index=df.index, dtype='string')
 
 
 def _handle_missing_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -187,6 +175,80 @@ def _handle_missing_data(df: pd.DataFrame) -> pd.DataFrame:
     final_count = len(df)
     logger.info(f"Missing data handling: {initial_count:,} → {final_count:,} records")
     
+    return df
+
+
+def _sanitize_and_cast_for_parquet(df: pd.DataFrame, h3_res: int) -> pd.DataFrame:
+    """Ensure deterministic dtypes for parquet writing to avoid schema merge errors.
+
+    - Avoid pandas 'category' dtype
+    - Cast temporal ints to fixed-width ints
+    - Ensure cyclical floats are float64
+    - Ensure h3 column is string dtype with pd.NA for missing
+    """
+    # Convert any categorical columns to string to avoid dictionary encodings
+    for col in df.columns:
+        if pd.api.types.is_categorical_dtype(df[col].dtype):
+            df[col] = df[col].astype('string')
+
+    # Temporal columns
+    if 'datetime' in df.columns:
+        # keep `date` as a pandas datetime64[ns] (midnight) to ensure pyarrow
+        # can convert it deterministically instead of python date objects
+        df['date'] = pd.to_datetime(df['datetime']).dt.normalize()
+        df['year'] = pd.to_datetime(df['datetime']).dt.year.astype('int32')
+        df['month'] = pd.to_datetime(df['datetime']).dt.month.astype('int8')
+        df['day_of_week'] = pd.to_datetime(df['datetime']).dt.dayofweek.astype('int8')
+        df['hour'] = pd.to_datetime(df['datetime']).dt.hour.astype('int8')
+
+    # Cyclical features to float64
+    cyc_cols = [c for c in df.columns if c.endswith('_sin') or c.endswith('_cos')]
+    for c in cyc_cols:
+        try:
+            df[c] = df[c].astype('float64')
+        except Exception:
+            # coerce non-numeric to NaN then to float64
+            df[c] = pd.to_numeric(df[c], errors='coerce').astype('float64')
+
+    # H3 column name may vary; normalize to 'h3_r{res}'
+    h3_col = f'h3_r{h3_res}'
+    if h3_col not in df.columns:
+        # attempt fallback names
+        for candidate in ['h3', 'h3_index', 'h3id', 'h3_r9']:
+            if candidate in df.columns:
+                df[h3_col] = df[candidate]
+                break
+
+    if h3_col in df.columns:
+        # ensure string dtype with pd.NA for missing
+        df[h3_col] = df[h3_col].where(pd.notna(df[h3_col]), pd.NA).astype('string')
+    else:
+        df[h3_col] = pd.Series([pd.NA] * len(df), dtype='string')
+
+    # Ensure street_norm exists and is string
+    if 'street_norm' in df.columns:
+        df['street_norm'] = df['street_norm'].astype('string')
+    else:
+        df['street_norm'] = pd.Series([pd.NA] * len(df), dtype='string')
+
+    # Ensure boolean columns are proper booleans or pandas boolean dtype
+    bool_cols = ['is_weekend', 'arrest_made', 'is_domestic']
+    for b in bool_cols:
+        if b in df.columns:
+            try:
+                df[b] = df[b].astype('boolean')
+            except Exception:
+                df[b] = df[b].astype('boolean')
+
+    # Numeric IDs: use pandas nullable Int64 where possible
+    int_id_cols = ['beat_id', 'district_id', 'ward_id', 'community_area_id', 'incident_year']
+    for col in int_id_cols:
+        if col in df.columns:
+            try:
+                df[col] = df[col].astype('Int64')
+            except Exception:
+                df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
+
     return df
 
 
@@ -242,13 +304,30 @@ def _process_partition(part_dir: Path, h3_res: int) -> Optional[pd.DataFrame]:
     # H3 assignment (coordinates are guaranteed to be non-null after missing data handling)
     if 'latitude' in df.columns and 'longitude' in df.columns:
         try:
-            df['h3_r9'] = _assign_h3(df, h3_res)
+            df[f'h3_r{h3_res}'] = _assign_h3(df, h3_res)
         except Exception as e:
             logger.error(f"H3 assignment failed: {e}")
-            df['h3_r9'] = None
+            df[f'h3_r{h3_res}'] = pd.Series([pd.NA] * len(df), dtype='string')
     else:
         logger.error("Missing latitude/longitude columns - cannot assign H3")
-        df['h3_r9'] = None
+        df[f'h3_r{h3_res}'] = pd.Series([pd.NA] * len(df), dtype='string')
+
+    # Materialize all configured H3 resolutions directly from coordinates.
+    # Some h3 package builds don't expose a parent function (h3_to_parent),
+    # so recomputing by resolution is more portable and deterministic.
+    for res in H3_RESOLUTIONS:
+        col = f'h3_r{res}'
+        if col in df.columns:
+            continue
+        try:
+            # _assign_h3 returns a string-dtyped Series with pd.NA for missing
+            df[col] = _assign_h3(df, res)
+        except Exception as e:
+            logger.warning(f"Failed assigning h3 at resolution {res}: {e}")
+            df[col] = pd.Series([pd.NA] * len(df), dtype='string')
+
+    # Sanitize and enforce deterministic dtypes before returning/writing
+    df = _sanitize_and_cast_for_parquet(df, h3_res)
 
     return df
 
@@ -259,7 +338,35 @@ def _write_l2(df: pd.DataFrame, year: int, month: int) -> None:
 
     out_dir = L2_DIR / f'year={year}' / f'month={month:02d}'
     out_dir.mkdir(parents=True, exist_ok=True)
-    table = pa.Table.from_pandas(df, preserve_index=False)
+
+    # Build a deterministic pyarrow schema from pandas dtypes
+    pa_fields = []
+    for col in df.columns:
+        pd_type = df[col].dtype
+        if pd.api.types.is_integer_dtype(pd_type):
+            pa_type = pa.int64()
+        elif pd.api.types.is_float_dtype(pd_type):
+            pa_type = pa.float64()
+        elif pd.api.types.is_bool_dtype(pd_type):
+            pa_type = pa.bool_()
+        elif pd.api.types.is_datetime64_any_dtype(pd_type):
+            pa_type = pa.timestamp('ns')
+        else:
+            # strings and object fall back to string
+            pa_type = pa.string()
+        pa_fields.append(pa.field(col, pa_type))
+
+    schema = pa.schema(pa_fields)
+
+    # Add metadata for provenance
+    meta = {
+        'h3_resolutions': ','.join(map(str, H3_RESOLUTIONS)),
+        'producer': 'src/l2_features.py',
+    }
+    # attach metadata as bytes
+    schema = schema.with_metadata({k: v.encode('utf8') for k, v in meta.items()})
+
+    table = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
     out_file = out_dir / f'features-{year}-{month:02d}.parquet'
     pq.write_table(table, out_file)
     logger.info(f'Wrote L2 features → {out_file} ({len(df)} rows)')
