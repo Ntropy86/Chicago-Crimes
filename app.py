@@ -22,13 +22,15 @@ from utils import expand_categories
 
 L3_BASE = DATA_DIR / 'l3'
 L2_BASE = DATA_DIR / 'l2'
-AVAILABLE_RES = [7, 8, 9]
+AVAILABLE_RES = [6, 7, 8, 9, 10]
 CHICAGO_CENTER = {"lat": 41.881832, "lon": -87.623177}
 
 RESOLUTION_GUIDE: Dict[int, Dict[str, str]] = {
+    6: {"label": "Citywide", "size": "≈4.7 km across", "story": "Useful for executive overviews and comparing entire patrol areas."},
     7: {"label": "District-scale", "size": "≈1.2 km across", "story": "Best for citywide comparisons and strategic deployment."},
     8: {"label": "Neighborhood-scale", "size": "≈0.46 km across", "story": "Balances coverage with localized patterns – great for beat discussions."},
     9: {"label": "Street-scale", "size": "≈0.17 km across", "story": "Highlights specific blocks/intersections for tactical response."},
+    10: {"label": "Micro-block", "size": "≈0.06 km across", "story": "Extremely granular – expect sparse counts unless aggregating multiple months."},
 }
 
 
@@ -63,7 +65,7 @@ def load_l2(year: int, months: Tuple[int, ...] | int) -> pd.DataFrame:
     months_tuple = _normalize_months(months)
     keep_cols = [
         'datetime', 'primary_type', 'crime_category', 'street_norm', 'block_address', 'arrest_made', 'community_area_id',
-        'district_id', 'ward_id', 'h3_r7', 'h3_r8', 'h3_r9'
+        'district_id', 'ward_id', 'h3_r6', 'h3_r7', 'h3_r8', 'h3_r9', 'h3_r10'
     ]
     frames: list[pd.DataFrame] = []
     for month in months_tuple:
@@ -427,6 +429,13 @@ def main():
     summary = summary.merge(context, on='h3_id', how='left').merge(share, on='h3_id', how='left')
     summary['focus_share'] = summary.get('focus_share', pd.Series(dtype=float)).replace([np.inf, -np.inf], np.nan)
     summary['focus_share'] = summary['focus_share'].fillna(0.0 if focus_types else np.nan)
+
+    if 'n_crimes' in summary.columns and not summary.empty:
+        density_ratio = float((summary['n_crimes'] >= 5).mean())
+    else:
+        density_ratio = 0.0
+    if res >= 10 and density_ratio < 0.2:
+        st.warning(f'Only {density_ratio:.0%} of r{res} hexes contain 5+ incidents. Consider selecting multiple months or lowering the resolution for a denser view.')
 
     h3_col = f'h3_r{res}'
     if focus_types and not filtered_l2.empty and h3_col in filtered_l2.columns:

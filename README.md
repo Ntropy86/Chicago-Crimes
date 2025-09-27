@@ -9,6 +9,7 @@ Operational repository for the Chicago crimes medallion pipeline.
 - Downloader now reuses token-authenticated sessions, respects rate limits, and persists checkpoints for resumability.
 - Streamlit hotspot app gained sidebar controls, multi-month selection, metric-aware colour palettes, and richer narratives.
 - Updated automated tests cover the new aggregation helpers and taxonomy mapping.
+- Added support for r6 (citywide) and r10 (micro-block) H3 resolutions; r10 is exposed with a sparsity warning so analysts can decide when the granularity is useful.
 
 ## Current Processing Status (2025-09-26)
 
@@ -51,6 +52,7 @@ streamlit run app.py
 ```
 
 - Sidebar controls: resolution (`r7/r8/r9`), year, month range, taxonomy categories, and specific crime types. Type dropdowns now show **only** the offences that belong to the categories you select.
+- Resolutions now include `r6` (coarse, citywide) and `r10` (micro-block). The app warns when r10 becomes sparse—aggregate more months or step back to `r8/r9` for a denser story.
 - Hex colour defaults to incident volume; when you apply a filter it swaps to “Selected incident volume” so red/green reflects your current focus. Arrest-rate metrics invert the palette (more arrests = greener) for clarity.
 - Legends and “Quick hits” narratives refresh automatically to describe the active metric and top hotspots.
 - Optional checkbox reruns the clustering prototype for each selected month (results land under `data/l3/clusters/`).
@@ -83,7 +85,7 @@ l2_sample = Path('data/l2/year=2024/month=09/features-2024-09.parquet')
 if l2_sample.exists():
     df = pd.read_parquet(l2_sample)
     print('L2 columns:', ', '.join(df.columns[:20]))
-    for col in ['h3_r7', 'h3_r8', 'h3_r9']:
+    for col in ['h3_r6', 'h3_r7', 'h3_r8', 'h3_r9', 'h3_r10']:
         print(col, 'present?', col in df.columns)
 else:
     print('Missing L2 sample', l2_sample)
@@ -107,7 +109,7 @@ Install optional extras on demand, e.g. `pip install umap-learn`.
 
 - L2 writes deterministic parquet schemas (no pandas `category`, timestamps normalized to `datetime64[ns]`).
 - H3 assignment guards against API differences (`latlng_to_cell` vs `geo_to_h3`) and missing libraries.
-- L3 aggregation tolerates alternate column names (e.g., `arrest` vs `arrest_made`) and uses vectorised math for Wilson CIs and neighbour pooling.
+- L3 aggregation tolerates alternate column names (e.g., `arrest` vs `arrest_made`) and uses vectorised math for Wilson CIs and neighbour pooling across r6→r10.
 - Downloader reuses a token-authenticated session with retry/backoff and persists checkpoints under `data/temp/.download_checkpoint.json`.
 - Streamlit maps use Plotly Mapbox; set `PLOTLY_MAPBOX_TOKEN` if you want premium tiles, or switch to `open-street-map` for offline-only demos.
 
@@ -122,7 +124,7 @@ Install optional extras on demand, e.g. `pip install umap-learn`.
 ### Quick Validation Runs
 
 - Full L2 rebuild from 2018 → 2025-08 validated `h3_r9`, cyclical encodings, street normalization, and taxonomy assignments.
-- Deterministic L3 aggregates exist for r7/r8/r9 and read back without schema drift; helper scripts sanity-check daily vs. monthly totals.
+- Deterministic L3 aggregates exist for r6→r10 and read back without schema drift; helper scripts sanity-check daily vs. monthly totals (note: r10 will be sparse without multi-month aggregation).
 - Run `pytest tests/test_pipeline.py` after pipeline changes to exercise sanitisation, taxonomy grouping, and aggregate helpers.
 
 ## Architecture Diagrams

@@ -72,8 +72,8 @@ class ConfigError(Exception):
 L1_DIR = Path('data/l1')
 L2_DIR = Path('data/l2')
 
-# H3 resolutions to materialize at L2 (coarse -> fine). Keep small list to limit storage.
-H3_RESOLUTIONS = [7, 8, 9]
+# H3 resolutions to materialize at L2 (coarse -> fine). Keep list small to limit storage.
+H3_RESOLUTIONS = [6, 7, 8, 9, 10]
 
 
 def _ensure_dirs() -> None:
@@ -271,7 +271,7 @@ def _sanitize_and_cast_for_parquet(df: pd.DataFrame, h3_res: int) -> pd.DataFram
     h3_col = f'h3_r{h3_res}'
     if h3_col not in df.columns:
         # attempt fallback names
-        for candidate in ['h3', 'h3_index', 'h3id', 'h3_r9']:
+        for candidate in ['h3', 'h3_index', 'h3id', 'h3_r10', 'h3_r9']:
             if candidate in df.columns:
                 df[h3_col] = df[candidate]
                 break

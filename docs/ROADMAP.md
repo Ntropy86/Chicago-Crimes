@@ -8,7 +8,7 @@ This roadmap captures the planned extensions beyond the currently shipping L1 â†
 - **Next Enhancements**:
   - Drill-down workflow: click a hex to focus KPI cards and trend charts on that area, with breadcrumbs to step back out.
   - Palette manager: metric-aware colour scales (volume, arrest %, clearance) with inline legends and accessibility checks.
-  - Hex resolution explorer: support r6 and finer (r10+) where data density allows; warn when selections become too sparse.
+  - Hex resolution explorer: r6/r10 now ship; evaluate UI affordances for even finer drill-downs and guidance when data becomes too sparse.
   - Narrative export for weekly reporting (Markdown/PDF) using the taxonomy summaries.
 - **Intern Learning Focus**: Usability research, interactive Plotly callbacks (selection events), and communicating statistical confidence to non-technical partners.
 

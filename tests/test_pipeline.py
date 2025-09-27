@@ -8,7 +8,13 @@ import os
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from l2_features import _sanitize_and_cast_for_parquet, _assign_h3, _normalize_street, _cyclical_encode
+from l2_features import (
+    _sanitize_and_cast_for_parquet,
+    _assign_h3,
+    _normalize_street,
+    _cyclical_encode,
+    H3_RESOLUTIONS,
+)
 from l3_multiscale import aggregate_daily_counts, aggregate_monthly_counts
 
 # Test data
@@ -40,7 +46,9 @@ class TestSanitizer:
         assert result['hour_cos'].dtype == 'float64'
         assert result['arrest_made'].dtype == 'boolean'
         assert result['beat_id'].dtype == 'Int64'
-        assert result['h3_r9'].dtype == 'string'
+        expected_h3 = f"h3_r{max(H3_RESOLUTIONS)}"
+        assert expected_h3 in result.columns
+        assert result[expected_h3].dtype == 'string'
         assert 'crime_category' in result.columns
 
     def test_normalize_street(self):
