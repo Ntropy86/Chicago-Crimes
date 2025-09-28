@@ -599,8 +599,12 @@ def main():
         st.session_state['selected_dow'] = None
 
     try:
-        st.info("Loading crime data from Hugging Face... This may take a moment on first load.")
+        # Create a placeholder for loading message
+        loading_placeholder = st.empty()
+        loading_placeholder.info("Loading crime data from Hugging Face... This may take a moment on first load.")
         l2_df = load_l2(year, months_tuple)
+        # Clear the loading message once data is loaded
+        loading_placeholder.empty()
     except FileNotFoundError as err:
         st.error(str(err))
         st.stop()
@@ -1320,17 +1324,6 @@ def main():
             'focus_share': 'Focus share'
         }
         st.dataframe(streets.rename(columns=rename_map))
-
-    with st.expander('Optional: recompute clustering overlay (UMAP + HDBSCAN)'):
-        run_clusters = st.checkbox('Rebuild clusters for this slice')
-        if run_clusters:
-            try:
-                from l3_clustering_prototype import run_clustering
-                for month in months_tuple:
-                    run_clustering(year, month, res=base_res)
-                st.success('Cluster run complete. Check data/l3/clusters/ for outputs.')
-            except Exception as exc:
-                st.error(f'Clustering failed: {exc}\nInstall dependencies: pip install umap-learn hdbscan')
 
 
 if __name__ == '__main__':
