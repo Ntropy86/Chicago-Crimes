@@ -2,6 +2,7 @@ name: chicago
 channels:
   - https://repo.anaconda.com/pkgs/main
   - https://repo.anaconda.com/pkgs/r
+  - conda-forge
 dependencies:
   - python=3.10
   - boto3
@@ -15,4 +16,13 @@ dependencies:
   - scikit-learn
   - statsmodels
   - tensorflow
-prefix: /root/miniconda3/envs/chicago
+  - scipy
+  - pyarrow
+  - h3
+  - hdbscan
+  - holidays
+  - pytest
+  - streamlit
+  - pip
+  - pip:
+    - streamlit-plotly-events
