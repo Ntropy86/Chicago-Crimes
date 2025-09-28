@@ -2,6 +2,8 @@
 
 Deterministic analytics and interactive storytelling for the Chicago Police Department crime feed. This repository houses the medallion pipeline (Bronze → Silver → Gold), drill-ready H3 aggregates, and the Streamlit hotspot console that analysts use to zoom from citywide context down to micro-block detail.
 
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://chicagocrimes.streamlit.app/)
+
 ---
 
 ## Architecture at a Glance
