@@ -24,6 +24,12 @@ from utils import expand_categories
 def download_from_huggingface(dataset_path, local_path):
     """Download file from Hugging Face dataset"""
     import os
+    from pathlib import Path
+    
+    # Ensure local_path is a Path object
+    if isinstance(local_path, str):
+        local_path = Path(local_path)
+    
     force_download = os.getenv('FORCE_HF_DOWNLOAD', 'false').lower() == 'true'
     print(f"DEBUG: FORCE_HF_DOWNLOAD={os.getenv('FORCE_HF_DOWNLOAD', 'not set')}, force_download={force_download}")
     print(f"DEBUG: Checking local file: {local_path}, exists={local_path.exists()}")
@@ -38,8 +44,16 @@ def download_from_huggingface(dataset_path, local_path):
         # Hugging Face dataset URL
         url = f"https://huggingface.co/datasets/ntropy86/ChicagoCrimesReported/resolve/main/{dataset_path}"
 
-        # Add headers to avoid rate limiting
+        # Add headers for authentication and user agent
         headers = {'User-Agent': 'Chicago-Crime-Hotspots-App/1.0'}
+        
+        # Add Hugging Face token if available
+        hf_token = os.getenv('HF_TOKEN') or os.getenv('HUGGINGFACE_TOKEN')
+        if hf_token:
+            headers['Authorization'] = f'Bearer {hf_token}'
+            print("DEBUG: Using Hugging Face authentication token")
+        else:
+            print("DEBUG: No HF_TOKEN found, attempting unauthenticated access")
 
         response = requests.get(url, headers=headers, stream=True)
         response.raise_for_status()
@@ -90,7 +104,7 @@ PLOTLY_CONFIG = {
 
 def load_parent_child_mapping(parent_res: int, child_res: int) -> pd.DataFrame:
     path = DATA_DIR / 'h3_mappings' / f'parents_res_{parent_res}_to_{child_res}.parquet'
-    dataset_path = f'data/h3_mappings/parents_res_{parent_res}_to_{child_res}.parquet'
+    dataset_path = f'h3_mappings/parents_res_{parent_res}_to_{child_res}.parquet'
     if not path.exists():
         if not download_from_huggingface(dataset_path, path):
             return pd.DataFrame(columns=['parent', 'child'])
@@ -169,15 +183,16 @@ def _normalize_months(months) -> Tuple[int, ...]:
 def load_l3(year: int, months: Tuple[int, ...] | int, res: int) -> pd.DataFrame:
     months_tuple = _normalize_months(months)
     frames: list[pd.DataFrame] = []
-    for month in months_tuple:
-        path = L3_BASE / f'res={res}' / f'year={year}' / f'month={month:02d}' / f'l3-aggregates-{res}-{year}-{month:02d}.parquet'
-        dataset_path = f'data/l3/res={res}/year={year}/month={month:02d}/l3-aggregates-{res}-{year}-{month:02d}.parquet'
-        if not download_from_huggingface(dataset_path, path):
-            raise FileNotFoundError(f'Missing L3 partition: {path} (failed to download from Hugging Face)')
-        df = pd.read_parquet(path)
-        df['date'] = pd.to_datetime(df['date'])
-        df['month'] = month
-        frames.append(df)
+    with st.spinner(f'Downloading L3 data for {year}...'):
+        for month in months_tuple:
+            path = L3_BASE / f'res={res}' / f'year={year}' / f'month={month:02d}' / f'l3-aggregates-{res}-{year}-{month:02d}.parquet'
+            dataset_path = f'l3/res={res}/year={year}/month={month:02d}/l3-aggregates-{res}-{year}-{month:02d}.parquet'
+            if not download_from_huggingface(dataset_path, path):
+                raise FileNotFoundError(f'Missing L3 partition: {path} (failed to download from Hugging Face)')
+            df = pd.read_parquet(path)
+            df['date'] = pd.to_datetime(df['date'])
+            df['month'] = month
+            frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
@@ -189,37 +204,37 @@ def load_l2(year: int, months: Tuple[int, ...] | int) -> pd.DataFrame:
         'district_id', 'ward_id', 'h3_r6', 'h3_r7', 'h3_r8', 'h3_r9', 'h3_r10'
     ]
     frames: list[pd.DataFrame] = []
-    for month in months_tuple:
-        path = L2_BASE / f'year={year}' / f'month={month:02d}' / f'features-{year}-{month:02d}.parquet'
-        filename = f'features-{year}-{month:02d}.parquet'
-        huggingface_url = f'https://huggingface.co/datasets/ntropy86/ChicagoCrimes/resolve/main/data/l2/year={year}/month={month:02d}/features-{year}-{month:02d}.parquet'
-        if not download_from_huggingface(huggingface_url, path):
-            raise FileNotFoundError(f'Missing L2 partition: {path} (failed to download from Hugging Face)')
-        df = pd.read_parquet(path)
-        df['month'] = month
-        if 'datetime' in df.columns:
-            df['datetime'] = pd.to_datetime(df['datetime'])
+    with st.spinner(f'Downloading L2 data for {year}...'):
+        for month in months_tuple:
+            path = L2_BASE / f'year={year}' / f'month={month:02d}' / f'features-{year}-{month:02d}.parquet'
+            dataset_path = f'l2/year={year}/month={month:02d}/features-{year}-{month:02d}.parquet'
+            if not download_from_huggingface(dataset_path, path):
+                raise FileNotFoundError(f'Missing L2 partition: {path} (failed to download from Hugging Face)')
+            df = pd.read_parquet(path)
+            df['month'] = month
+            if 'datetime' in df.columns:
+                df['datetime'] = pd.to_datetime(df['datetime'])
 
-        if 'arrest_made' not in df.columns and 'arrest' in df.columns:
-            df['arrest_made'] = df['arrest']
-        if 'primary_type' not in df.columns and 'crime_type' in df.columns:
-            df['primary_type'] = df['crime_type']
-        if 'street_norm' not in df.columns:
-            if 'block_address' in df.columns:
-                df['street_norm'] = df['block_address']
-            elif 'block' in df.columns:
-                df['street_norm'] = df['block']
-        if 'block_address' not in df.columns and 'block' in df.columns:
-            df['block_address'] = df['block']
+            if 'arrest_made' not in df.columns and 'arrest' in df.columns:
+                df['arrest_made'] = df['arrest']
+            if 'primary_type' not in df.columns and 'crime_type' in df.columns:
+                df['primary_type'] = df['crime_type']
+            if 'street_norm' not in df.columns:
+                if 'block_address' in df.columns:
+                    df['street_norm'] = df['block_address']
+                elif 'block' in df.columns:
+                    df['street_norm'] = df['block']
+            if 'block_address' not in df.columns and 'block' in df.columns:
+                df['block_address'] = df['block']
 
-        available_cols = [c for c in keep_cols if c in df.columns]
-        df = df[available_cols + ['month']].copy()
-        if 'arrest_made' in df.columns:
-            try:
-                df['arrest_made'] = df['arrest_made'].astype('boolean').fillna(False)
-            except Exception:
-                df['arrest_made'] = df['arrest_made'].apply(lambda x: bool(x) if pd.notna(x) else False).astype('boolean')
-        frames.append(df)
+            available_cols = [c for c in keep_cols if c in df.columns]
+            df = df[available_cols + ['month']].copy()
+            if 'arrest_made' in df.columns:
+                try:
+                    df['arrest_made'] = df['arrest_made'].astype('boolean').fillna(False)
+                except Exception:
+                    df['arrest_made'] = df['arrest_made'].apply(lambda x: bool(x) if pd.notna(x) else False).astype('boolean')
+            frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
@@ -523,13 +538,15 @@ def main():
     current_res_label = RESOLUTION_GUIDE.get(base_res, {'label': f'r{base_res}'})['label']
     st.sidebar.markdown(f"**Starting resolution:** {current_res_label} (use the map controls to change it)")
 
-    years = sorted(int(p.name.split('=')[1]) for p in (L3_BASE / f'res={base_res}').glob('year=*') if p.is_dir())
+    # Available years in the Hugging Face dataset (2018-2025)
+    years = list(range(2018, 2026))
     if not years:
         st.error('No L3 data found for the selected resolution.')
         st.stop()
 
     year = st.sidebar.selectbox('Year', years, index=len(years) - 1)
-    months = sorted(int(p.name.split('=')[1]) for p in (L3_BASE / f'res={base_res}' / f'year={year}').glob('month=*') if p.is_dir())
+    # Available months in the dataset (1-12)
+    months = list(range(1, 13))
     if not months:
         st.error('No months available for selected year/resolution.')
         st.stop()
@@ -550,6 +567,7 @@ def main():
         st.session_state['selected_dow'] = None
 
     try:
+        st.info("Loading crime data from Hugging Face... This may take a moment on first load.")
         l2_df = load_l2(year, months_tuple)
     except FileNotFoundError as err:
         st.error(str(err))
