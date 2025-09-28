@@ -482,14 +482,9 @@ def main():
         st.session_state['base_res_choice'] = pending_res
 
     st.sidebar.header('Explore the city')
-    st.sidebar.subheader('Map settings')
-    st.sidebar.selectbox(
-        'Hex resolution',
-        AVAILABLE_RES,
-        index=AVAILABLE_RES.index(st.session_state['base_res_choice']),
-        key='base_res_choice',
-    )
     base_res = st.session_state['base_res_choice']
+    current_res_label = RESOLUTION_GUIDE.get(base_res, {'label': f'r{base_res}'})['label']
+    st.sidebar.markdown(f"**Starting resolution:** {current_res_label} (use the map controls to change it)")
 
     years = sorted(int(p.name.split('=')[1]) for p in (L3_BASE / f'res={base_res}').glob('year=*') if p.is_dir())
     if not years:
@@ -660,7 +655,11 @@ def main():
             upper = max(upper, 0.1)
             color_range = (0.0, upper)
         else:
-            upper = max(upper, 1.0)
+            if metric_series.gt(0).any():
+                q90 = float(metric_series.quantile(0.9))
+                upper = max(q90, upper * 0.6, 1.0)
+            else:
+                upper = max(upper, 1.0)
             color_range = (0.0, upper)
 
     color_scale, legend_low, legend_high = metric_palette(color_metric)
@@ -774,7 +773,7 @@ def main():
             st.rerun()
 
         ctrl_mid.markdown(f"**{view_title}**")
-        ctrl_mid.caption(f"{timeframe_caption} · {resolution_display}")
+        ctrl_mid.caption(f"{timeframe_caption} · {resolution_display}\nClick a hex to drill into its details.")
 
         next_disabled = base_res >= MAX_RES
         next_label = RESOLUTION_GUIDE.get(base_res + 1, {'label': f'r{base_res + 1}'})['label']
@@ -826,6 +825,7 @@ def main():
             st.caption(
                 f"Legend: green → {legend_low}; red → {legend_high}. Resolution {resolution_display} ≈ {RESOLUTION_GUIDE[effective_res]['size']}."
             )
+            map_fig.update_layout(mapbox=dict(zoom=max(map_zoom, 9)))
             selected_hex = None
             if isinstance(selection_state, dict):
                 points = selection_state.get('selection', {}).get('points', [])
@@ -888,6 +888,12 @@ def main():
     if has_arrest_flag:
         working_l2['arrest_made'] = working_l2['arrest_made'].astype(bool)
 
+    crime_type_col = None
+    for candidate in ('primary_type', 'crime_category'):
+        if candidate in working_l2.columns:
+            crime_type_col = candidate
+            break
+
     if drill_stack and extra_tabs:
         breadcrumb_tab = extra_tabs[0]
         with breadcrumb_tab:
@@ -945,45 +951,68 @@ def main():
     if has_datetime:
         st.markdown('## Temporal Patterns')
         st.caption('How incident and arrest activity evolves over the selected period.')
-        st.subheader('Daily trend & arrest compare')
-        trend_title = f"Daily incidents — {scope_label}"
-        trend_fig = px.area(daily, x='date', y='n_crimes', title=trend_title, color_discrete_sequence=['#d73027'])
-        trend_fig.update_traces(line_color='#a50026', fillcolor='rgba(215,48,31,0.35)')
-        trend_fig.update_layout(yaxis_title='Incidents', xaxis_title='Date', height=360, template='plotly_white', hovermode='x unified')
+        st.subheader('Daily incident blend')
 
-        compare_cols = st.columns(2, gap='large')
-        with compare_cols[0]:
-            st.plotly_chart(trend_fig, use_container_width=True, config=PLOTLY_CONFIG)
+        stacked_fig = None
+        if crime_type_col and not working_l2.empty:
+            type_counts = (
+                working_l2[crime_type_col]
+                .dropna()
+                .value_counts()
+                .sort_values(ascending=False)
+            )
+            top_types = list(type_counts.head(5).index)
+            type_grouped = working_l2.assign(
+                type_bucket=lambda df: df[crime_type_col].where(df[crime_type_col].isin(top_types), other='Other')
+            )
+            daily_type = (
+                type_grouped
+                .assign(date=lambda df: df['datetime'].dt.floor('D'))
+                .groupby(['date', 'type_bucket'])
+                .size()
+                .reset_index(name='incidents')
+            )
+            stacked_fig = px.bar(
+                daily_type,
+                x='date',
+                y='incidents',
+                color='type_bucket',
+                title=f'Offense mix by day — {scope_label}',
+                color_discrete_sequence=px.colors.qualitative.Safe,
+            )
+            stacked_fig.update_layout(template='plotly_white', legend_title='Offense bucket', hovermode='x unified')
+            stacked_fig.update_xaxes(title='Date')
+            stacked_fig.update_yaxes(title='Incidents')
 
-        with compare_cols[1]:
+        daily_cols = st.columns([1.6, 1.0], gap='large')
+
+        with daily_cols[0]:
+            if stacked_fig is not None:
+                st.plotly_chart(stacked_fig, use_container_width=True, config=PLOTLY_CONFIG)
+            else:
+                st.info('Crime mix by day unavailable – missing offense metadata.')
+
+        with daily_cols[1]:
             if has_arrest_flag:
-                trend_compare = (
-                    working_l2.assign(date=working_l2['datetime'].dt.floor('D'))
-                    .groupby('date')
-                    .agg(
-                        incidents=('datetime', 'size'),
-                        arrests=('arrest_made', lambda s: s.eq(True).sum()),
-                    )
-                    .reset_index()
+                total_inc = int(daily['n_crimes'].sum())
+                total_arr = int(daily['arrests'].sum())
+                arrest_pie_df = pd.DataFrame(
+                    {
+                        'category': ['Arrests', 'No arrest'],
+                        'count': [total_arr, max(total_inc - total_arr, 0)],
+                    }
                 )
-                line_colors = {'incidents': '#d73027', 'arrests': '#238b45'}
-                melted = trend_compare.melt(id_vars='date', value_vars=['incidents', 'arrests'], var_name='metric', value_name='count')
-                compare_fig = px.line(
-                    melted,
-                    x='date',
-                    y='count',
-                    color='metric',
-                    color_discrete_map=line_colors,
-                    title=f'Incidents vs arrests — {scope_label}',
+                arrest_pie = px.pie(
+                    arrest_pie_df,
+                    values='count',
+                    names='category',
+                    title=f'Arrest outcomes — {scope_label}',
+                    color='category',
+                    color_discrete_map={'Arrests': '#238b45', 'No arrest': '#fddbc7'},
+                    hole=0.45,
                 )
-                compare_fig.update_layout(
-                    template='plotly_white',
-                    hovermode='x unified',
-                    yaxis_title='Count',
-                    xaxis_title='Date',
-                    legend_title='Metric',
-                )
-                st.plotly_chart(compare_fig, use_container_width=True, config=PLOTLY_CONFIG)
+                arrest_pie.update_layout(template='plotly_white')
+                st.plotly_chart(arrest_pie, use_container_width=True, config=PLOTLY_CONFIG)
             else:
                 st.info('Arrest data not available for this selection.')
 
