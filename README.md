@@ -1,168 +1,139 @@
-# Chicago Crimes
+# Chicago Crime Hotspot Console
 
-Operational repository for the Chicago crimes medallion pipeline.
+Deterministic analytics and interactive storytelling for the Chicago Police Department crime feed. This repository houses the medallion pipeline (Bronze → Silver → Gold), drill-ready H3 aggregates, and the Streamlit hotspot console that analysts use to zoom from citywide context down to micro-block detail.
 
-## Latest Enhancements (September 2025)
+---
 
-- Crime taxonomy utility added to L2 so every record carries both `primary_type` and a grouped category for Streamlit filtering.
-- Vectorised H3 assignment and aggregation keep r7/r8/r9 aligned while cutting pipeline runtimes.
-- Downloader now reuses token-authenticated sessions, respects rate limits, and persists checkpoints for resumability.
-- Streamlit hotspot app gained sidebar controls, multi-month selection, metric-aware colour palettes, and richer narratives.
-- Updated automated tests cover the new aggregation helpers and taxonomy mapping.
-- Added support for r6 (citywide) and r10 (micro-block) H3 resolutions; r10 is exposed with a sparsity warning so analysts can decide when the granularity is useful.
-- Streamlit dashboard now supports interactive drill-down—click a hex to zoom one resolution deeper with breadcrumbs and KPI re-scoping.
+## Architecture at a Glance
 
-## Current Processing Status (2025-09-26)
-
-- **L1 Bronze**: Raw CSVs stored under `data/raw/`, standardized parquet partitions under `data/l1/`.
-- **L2 Silver**: Feature-enriched parquet partitions with H3 identifiers (r6→r10) under `data/l2/year=YYYY/month=MM/`.
-- **L3 Gold**: Deterministic daily and monthly aggregates for r6→r10 under `data/l3/res={res}/year=YYYY/month=MM/`.
-
-## Runbooks
-
-All commands assume repository root and an activated project environment.
-
-### Rebuild L2 (L1 → L2)
-
-```bash
-python3 src/l2_features.py [start_year]
+```
+Socrata API → L1 Bronze (schema+parquet) → L2 Silver (feature engineering + H3 r6–r10)
+                ↓                                 ↓
+         Taxonomy helpers                Context tables (streets/districts)
+                ↓                                 ↓
+       L3 Gold multiscale aggregates  ← Deterministic analytics scripts
+                ↓                                 ↓
+        Streamlit Hotspot Console  → KPI exports / Notebooks / Clustering prototypes
 ```
 
-- Optional `start_year` (YYYY) skips older partitions. Omit to process every available year.
+### Pipeline layers
 
-### Rebuild deterministic L3 aggregates
+- **L1 Bronze (`data/l1/`)** – cleans raw CSV downloads, normalises schema, persists canonical parquet partitions by `year/month`.
+- **L2 Silver (`data/l2/`)** – enriches each incident with taxonomy labels, multi-resolution H3 IDs (r6–r10), arrest boolean, and street context. This layer powers most downstream features.
+- **L3 Gold (`data/l3/`)** – deterministic daily + monthly aggregates for every resolution. Outputs include incident counts, arrest totals, Wilson CI arrest rates, neighbour-pooled smoothed rates, and low-confidence flags.
+
+### Streamlit deterministic analytics stack
+
+1. **Scope selection** – analysts pick resolution, year, and month range; taxonomy filters restrict the crime universe.
+2. **Deterministic aggregation** – L3 data provides pre-computed metrics so the app never runs heavy group-bys at runtime.
+3. **Spatial drill-down** – resolved by precomputed parent/child H3 maps; clicking a hex pushes a breadcrumb-driven stack (r6 → r7 → … → r10).
+4. **KPI + narrative engine** – KPIs, focus-share deltas, and “Quick hits” bullet narratives are scoped to the active drill level.
+5. **Temporal analytics** – stacked offense mix by day, arrest-outcome donut, interactive day-of-week selection, and hourly incident profile update in tandem.
+6. **Tabular insight** – signature blocks/streets, dominant offense, and jurisdiction IDs surface for the scoped geography.
+
+Upcoming **Statistical/ML** phases (not yet shipped) will sit beside L3: forecasting, anomaly scoring, and similarity-based clustering.
+
+---
+
+## Data Science Lifecycle (current release)
+
+| Stage | What we deliver | Key techniques |
+|-------|-----------------|----------------|
+| **Ingest & Normalise** | Bronze parquet with stable schema | Schema inference, dtype harmonisation, timestamp conversions |
+| **Feature Engineering** | Taxonomy labels, multi-resolution H3 IDs, arrest boolean | Vectorised H3 transforms, category mapping, geo fallback logic |
+| **Deterministic Aggregation** | Daily/monthly tallies, smoothed arrest rates, neighbour pooling | Weighted averages, Wilson confidence intervals, multi-res lattice joins |
+| **Quality Gates** | Partition-level smoke tests, coverage checks, skew warnings | Pandera checks, intensity density heuristics, missing H3 guard rails |
+| **Analytic Storytelling** | Streamlit hotspot console with drill-down narratives | Plotly mapbox, KPI templating, interactive filters, stacked temporal visuals |
+| **(Next) Statistical & ML** | Forecasting, clustering, anomaly detection | ARIMA/LSTM/transformers, embedding UMAP, HDBSCAN, causal uplift | 
+
+---
+
+## Hotspot Console – Key Capabilities
+
+- **Multi-resolution insight** – start macroscopic (`Citywide` r6) and dive to `Street-scale` (r9) or `Micro-block` (r10) via click-to-drill.
+- **Deterministic KPIs** – total incidents, busiest hex incidents, focus-share delta, arrest totals stay in sync with drill scope.
+- **Focus-aware colouring** – filters flip the map palette to “Selected incident volume”; when filters are off, the palette defaults to total incidents. Arrest-rate palettes invert to highlight positive clearance.
+- **Temporal analytics** – offense mix by day, arrest vs. non-arrest donut, interactive day-of-week selection that spotlights hourly patterns.
+- **Contextual breadcrumbs** – each breadcrumb renders semantic labels (block, district, ward, etc.) instead of raw H3 IDs.
+- **Performance tuned** – r8+ views render the top 600 cells to keep the surface responsive; deeper drills still access full detail.
+
+
+![Chicago Crime Hotspot Console](docs/assets/hotspot-console-overview.png)
+![Daily & Arrest Analytics](docs/assets/hotspot-console-analytics.png)
+![Street-scale drill-down](docs/assets/hotspot-console-street-scale.png)
+
+---
+
+## Getting Started
+
+### Environment
 
 ```bash
-python3 src/l3_multiscale.py [year] [month]
+conda env create -f environment.yml  # or pip install -r requirements.txt
+conda activate chicago
 ```
 
-- Provide year/month to scope work; omit to process all partitions.
-- After L3 finishes, refresh the drill-down mapping that powers the Streamlit click interactions:
+### Refresh Silver/Gold layers
 
 ```bash
+python src/l2_features.py 2020      # optional start year
+python src/l3_multiscale.py 2025 08  # optional targeted rebuild
 python scripts/precompute_h3_drilldown.py
 ```
 
-### Run clustering prototype (UMAP + HDBSCAN)
-
-```bash
-python3 src/l3_clustering_prototype.py YEAR MONTH
-```
-
-- Requires `umap-learn` and `hdbscan` installed.
-
-### Launch hotspot dashboard (Streamlit)
+### Launch the console
 
 ```bash
 streamlit run app.py
 ```
 
-- Sidebar controls: resolution (`r7/r8/r9`), year, month range, taxonomy categories, and specific crime types. Type dropdowns now show **only** the offences that belong to the categories you select.
-- Resolutions now include `r6` (coarse, citywide) and `r10` (micro-block). The app warns when r10 becomes sparse—aggregate more months or step back to `r8/r9` for a denser story.
-- Hex colour defaults to incident volume; when you apply a filter it swaps to “Selected incident volume” so red/green reflects your current focus. Arrest-rate metrics invert the palette (more arrests = greener) for clarity.
-- Legends and “Quick hits” narratives refresh automatically to describe the active metric and top hotspots.
-- Optional checkbox reruns the clustering prototype for each selected month (results land under `data/l3/clusters/`).
-- Click a hex to drill one level deeper (r6→r7 … r9→r10); breadcrumbs and KPI cards update to the selected area, with “Step back” and “Reset view” buttons in the sidebar.
+- Use the sidebar to select year/month and taxonomy filters; resolution buttons on the map drive drill depth.
+- Click a hex to load its children; the breadcrumb tab records drill history so you can jump back.
+- KPI labels show the semantic geography (e.g., `Neighborhood-scale · District 12`).
 
-### Notebook for deeper analysis
+---
 
-- `notebooks/01_hotspot_storytelling.ipynb` mirrors the dashboard logic with additional cells for ad-hoc exploration.
+## Repository Layout
 
-### Crime taxonomy helpers
-
-```python
-from utils import categorize_primary_type, expand_categories
-
-categorize_primary_type('BURGLARY')  # -> 'Property'
 ```
-- `categorize_primary_type` maps raw CPD `primary_type` strings into a curated taxonomy (Violent, Property, Narcotics, Disorder, Traffic, Unclassified).
-- `expand_categories` groups any iterable of crime types for UI display—the Streamlit sidebar uses it to keep crime-type pills in sync with category choices.
-- L2 materialisation writes both `primary_type` and `crime_category`, so downstream notebooks/apps can slice by either level without additional joins.
-
-## Smoke Checks
-
-Run this quick verification to confirm a representative L2/L3 partition:
-
-```bash
-python3 - <<'PY'
-import pandas as pd
-from pathlib import Path
-
-l2_sample = Path('data/l2/year=2024/month=09/features-2024-09.parquet')
-if l2_sample.exists():
-    df = pd.read_parquet(l2_sample)
-    print('L2 columns:', ', '.join(df.columns[:20]))
-    for col in ['h3_r6', 'h3_r7', 'h3_r8', 'h3_r9', 'h3_r10']:
-        print(col, 'present?', col in df.columns)
-else:
-    print('Missing L2 sample', l2_sample)
-
-l3_sample = Path('data/l3/res=9/year=2024/month=09/l3-aggregates-9-2024-09.parquet')
-print('L3 sample exists?', l3_sample.exists())
-PY
+.
+├── app.py                # Streamlit console
+├── data/
+│   ├── raw/              # Bronze inputs (Socrata extracts)
+│   ├── l1/               # Bronze parquet layers
+│   ├── l2/               # Silver feature parquet
+│   └── l3/               # Gold deterministic aggregates (r6–r10)
+├── docs/
+│   ├── assets/           # Screenshots & diagrams (add PNGs here)
+│   └── ROADMAP.md        # Upcoming statistical & ML work
+├── notebooks/            # Exploration notebooks (Storytelling, QA, prototyping)
+├── scripts/              # Helper CLI scripts (drilldown map, diagnostics)
+├── src/                  # Pipeline entry points and shared utilities
+└── tests/                # pytest-based regression checks
 ```
 
-## Dependencies
+---
 
-Key packages are pinned in `requirements.txt`. Notable extras:
+## Maintenance & QA
 
-- `h3` – spatial hex indexing (required for L2/L3)
-- `hdbscan` – clustering backend (prototype)
-- `umap-learn` – dimensionality reduction (prototype)
-- `streamlit-plotly-events` – capture Plotly click events for drill-down UX
+- `pytest tests/test_pipeline.py` after pipeline changes.
+- `python scripts/precompute_h3_drilldown.py` whenever H3 coverage changes.
+- Monitor warnings surfaced by the dashboard (`r10` sparsity density prompts, missing partitions, etc.).
 
-Install optional extras on demand, e.g. `pip install umap-learn`.
+---
 
-## Maintenance Notes
+## Roadmap (Deterministic → Statistical/ML)
 
-- L2 writes deterministic parquet schemas (no pandas `category`, timestamps normalized to `datetime64[ns]`).
-- H3 assignment guards against API differences (`latlng_to_cell` vs `geo_to_h3`) and missing libraries.
-- L3 aggregation tolerates alternate column names (e.g., `arrest` vs `arrest_made`) and uses vectorised math for Wilson CIs and neighbour pooling across r6→r10.
-- Downloader reuses a token-authenticated session with retry/backoff and persists checkpoints under `data/temp/.download_checkpoint.json`.
-- Streamlit maps use Plotly Mapbox; set `PLOTLY_MAPBOX_TOKEN` if you want premium tiles, or switch to `open-street-map` for offline-only demos.
+- ✅ Deterministic L1–L3 pipeline, taxonomy-aware H3 features, drill-down maps.
+- 🔄 Enrich with census & beat-level context for narrative cards.
+- 🔜 Statistical forecasts (ARIMA/Prophet) and causal uplift experiments.
+- 🔜 ML clustering + embeddings for automated hotspot segmentation.
+- 🔜 Alerting/notification layer (Slack/Teams) powered by deterministic anomaly detection.
 
-### Recent Fixes
+For detailed milestones, see `docs/ROADMAP.md`.
 
-- Casted coordinates to floats to avoid `H3ResDomainError`; per-row failures now resolve to `<NA>`.
-- Normalized street names even when L1 exports `block` instead of `block_address`.
-- Clarified CLI: `src/l2_features.py` treats the first argument as `start_year`; it does **not** change H3 resolution.
-- Added taxonomy enrichment, parent H3 derivation (r7/r8 from r9), and high-speed neighbour pooling for L3.
-- Streamlit sidebar now drives crime categories/types from the taxonomy and defaults map colours to focus metrics when filters are active.
+---
 
-### Quick Validation Runs
+## License
 
-- Full L2 rebuild from 2018 → 2025-08 validated `h3_r9`, cyclical encodings, street normalization, and taxonomy assignments.
-- Deterministic L3 aggregates exist for r6→r10 and read back without schema drift; helper scripts sanity-check daily vs. monthly totals (note: r10 will be sparse without multi-month aggregation).
-- Run `pytest tests/test_pipeline.py` after pipeline changes to exercise sanitisation, taxonomy grouping, and aggregate helpers.
-
-## Architecture Diagrams
-
-```mermaid
-flowchart LR
-   subgraph Bronze
-      RAW[Raw CSV<br/>Socrata exports]
-      RAW --> L1[L1 builder<br/>schema + parquet]
-   end
-   subgraph Silver
-      L1 -->|feature engineering| L2[L2 features<br/>H3 r7/r8/r9 + taxonomy]
-      L2 --> Context[Context tables<br/>top streets/districts]
-   end
-   subgraph Gold
-      L2 -->|daily + monthly rollups| L3[L3 multiscale aggregates]
-   end
-   L3 --> Streamlit[Hotspot dashboard]
-   L3 --> Forecast[Forecast notebooks]
-   L2 --> Clustering[UMAP + HDBSCAN prototype]
-```
-
-```mermaid
-sankey-beta
-   source RAW L1 L2 L2 L3 L3 L3 Streamlit Streamlit Forecast
-   target L1 L2 L3 Context Streamlit Forecast Clustering StreamlitUsers DataExports Stakeholders
-   value 100 100 80 20 60 20 20 40 10 10
-   label "Raw" "L1" "L2" "Context" "L3" "Forecast" "Clusters" "Dashboard" "Exports" "Forecast consumers"
-```
-
-## Roadmap
-
-Future work—forecasting (ARIMA/LSTM/transformers), census enrichment, advanced clustering dashboards, and agentic exploration—is tracked in `docs/ROADMAP.md`. Those items are explicitly marked as **post-demo** so this README only reflects features that ship today.
+Internal analytics project – see `LICENSE` (or company policy) for usage restrictions.
