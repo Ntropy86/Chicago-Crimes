@@ -102,6 +102,38 @@ PLOTLY_CONFIG = {
 }
 
 
+@st.cache_data(show_spinner=False)
+def get_available_months(year: int) -> list[int]:
+    """Get available months for a given year from the HF dataset."""
+    import requests
+    import os
+    
+    hf_token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGINGFACE_TOKEN')
+    if not hf_token:
+        # Fallback to hardcoded months if no token (shouldn't happen in production)
+        return list(range(1, 13))
+    
+    headers = {'Authorization': f'Bearer {hf_token}'}
+    url = f'https://huggingface.co/api/datasets/ntropy86/ChicagoCrimesReported/tree/main/l2/year={year}'
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        months = []
+        for item in data:
+            if item['type'] == 'directory' and item['path'].startswith(f'l2/year={year}/month='):
+                month_str = item['path'].split('month=')[1]
+                try:
+                    months.append(int(month_str))
+                except ValueError:
+                    continue
+        return sorted(months) if months else list(range(1, 13))
+    except Exception:
+        # Fallback to hardcoded months if API fails
+        return list(range(1, 13))
+
+
 def load_parent_child_mapping(parent_res: int, child_res: int) -> pd.DataFrame:
     path = DATA_DIR / 'h3_mappings' / f'parents_res_{parent_res}_to_{child_res}.parquet'
     dataset_path = f'h3_mappings/parents_res_{parent_res}_to_{child_res}.parquet'
@@ -545,14 +577,14 @@ def main():
         st.stop()
 
     year = st.sidebar.selectbox('Year', years, index=len(years) - 1)
-    # Available months in the dataset (1-12)
-    months = list(range(1, 13))
+    # Available months in the dataset for the selected year
+    months = get_available_months(year)
     if not months:
         st.error('No months available for selected year/resolution.')
         st.stop()
 
     month_label = lambda m: calendar.month_abbr[m]
-    default_months = [months[-1]]
+    default_months = [months[-1]]  # Use the most recent available month
     months_key = f"months-r{base_res}-{year}"
     selected_months = st.sidebar.multiselect('Months', months, default=default_months, format_func=month_label, key=months_key)
     if not selected_months:
