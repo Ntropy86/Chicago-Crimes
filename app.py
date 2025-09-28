@@ -49,6 +49,12 @@ warnings.filterwarnings('ignore', message='.*choropleth_mapbox.*', category=Depr
 CRIME_SCALE = ['#9bd174', '#6bbf59', '#f5e663', '#f9a64c', '#ef6248', '#b0202f']
 ARREST_SCALE = list(reversed(CRIME_SCALE))
 
+PLOTLY_CONFIG = {
+    'scrollZoom': True,
+    'displaylogo': False,
+    'modeBarButtonsToRemove': ['lasso2d', 'select2d']
+}
+
 
 def load_parent_child_mapping(parent_res: int, child_res: int) -> pd.DataFrame:
     path = DATA_DIR / 'h3_mappings' / f'parents_res_{parent_res}_to_{child_res}.parquet'
@@ -59,11 +65,21 @@ def load_parent_child_mapping(parent_res: int, child_res: int) -> pd.DataFrame:
 
 def describe_hex_area(l2_df: pd.DataFrame, hex_id: str, res: int) -> str:
     col = f'h3_r{res}'
+    guide_label = RESOLUTION_GUIDE.get(res, {'label': f'r{res}'}).get('label', f'r{res}')
+    fallback = f"{guide_label} hotspot"
     if col not in l2_df.columns:
-        return f'H3 {hex_id}'
+        return fallback
     subset = l2_df[l2_df[col] == hex_id]
     if subset.empty:
-        return f'H3 {hex_id}'
+        return fallback
+
+    def format_block(raw_block: str | None) -> str | None:
+        if not raw_block or raw_block == 'UNKNOWN':
+            return None
+        clean = str(raw_block).strip().title()
+        if clean.upper().startswith('0X0X0X'):  # guard random placeholders
+            return None
+        return clean
 
     def mode(series, replacements=None):
         s = series.dropna()
@@ -74,6 +90,16 @@ def describe_hex_area(l2_df: pd.DataFrame, hex_id: str, res: int) -> str:
             return None
         return s.mode().iat[0]
 
+    if res >= 9:
+        block_val = None
+        if 'signature_block' in subset.columns:
+            block_val = mode(subset['signature_block'])
+        if not block_val and 'block_address' in subset.columns:
+            block_val = mode(subset['block_address'])
+        pretty_block = format_block(block_val)
+        if pretty_block:
+            return pretty_block
+
     if res >= 9 and 'street_norm' in subset.columns:
         street = mode(subset['street_norm'], replacements={'': None})
         if street:
@@ -82,19 +108,19 @@ def describe_hex_area(l2_df: pd.DataFrame, hex_id: str, res: int) -> str:
     if 'district_id' in subset.columns:
         district = mode(subset['district_id'])
         if pd.notna(district):
-            return f"District {int(district)}"
+            return f"District {int(district):02d}"
 
     if 'community_area_id' in subset.columns:
         community = mode(subset['community_area_id'])
         if pd.notna(community):
-            return f"Community Area {int(community)}"
+            return f"Community Area {int(community):02d}"
 
     if 'ward_id' in subset.columns:
         ward = mode(subset['ward_id'])
         if pd.notna(ward):
-            return f"Ward {int(ward)}"
+            return f"Ward {int(ward):02d}"
 
-    return f'H3 {hex_id}'
+    return fallback
 
 
 def _normalize_months(months) -> Tuple[int, ...]:
@@ -446,8 +472,8 @@ def main():
         st.session_state['base_signature'] = None
     if 'base_res_choice' not in st.session_state:
         st.session_state['base_res_choice'] = 7
-    if 'selected_day' not in st.session_state:
-        st.session_state['selected_day'] = None
+    if 'selected_dow' not in st.session_state:
+        st.session_state['selected_dow'] = None
     if 'selected_dow' not in st.session_state:
         st.session_state['selected_dow'] = None
     pending_res = st.session_state.pop('base_res_pending', None)
@@ -489,7 +515,6 @@ def main():
     if st.session_state.get('base_signature') != signature:
         st.session_state['base_signature'] = signature
         st.session_state['drill_stack'] = []
-        st.session_state['selected_day'] = None
         st.session_state['selected_dow'] = None
 
     try:
@@ -643,13 +668,14 @@ def main():
     st.sidebar.caption(h3_story(effective_res))
 
     if drill_stack:
-        view_title = f"{drill_stack[-1]['label']} · {res_label}"
-        scope_label = f"{drill_stack[-1]['label']} ({res_label})"
+        focus_name = drill_stack[-1]['label']
     else:
-        view_title = f"{res_label} hotspots"
-        scope_label = f"Chicago – {res_label}"
+        focus_name = 'Citywide'
+
+    scope_label = f"{res_label} · {focus_name}"
+    view_title = scope_label
     timeframe_caption = f"{timeframe_label} {year}".strip()
-    summary_title = f"{view_title} – {timeframe_caption}"
+    summary_title = f"{scope_label} – {timeframe_caption}"
 
     focus_counts = share[['h3_id', 'focus_count']] if 'focus_count' in share.columns else pd.DataFrame(columns=['h3_id', 'focus_count'])
     focus_counts = focus_counts.fillna({'focus_count': 0})
@@ -657,15 +683,19 @@ def main():
     map_summary = summary
     if effective_res > 7 and focus_hexes is None and not summary.empty:
         map_summary = summary.sort_values('n_crimes', ascending=False).head(600).copy()
+    summary_view = map_summary
+    scope_hex_ids: set[str] = set(summary_view['h3_id']) if not summary_view.empty else set()
+    if not focus_counts.empty and scope_hex_ids:
+        focus_counts = focus_counts[focus_counts['h3_id'].isin(scope_hex_ids)]
 
     if focus_types:
         total_incidents = int(current_l2.shape[0])
         busiest_focus = focus_counts.sort_values('focus_count', ascending=False).head(1)
         top_hex = int(busiest_focus['focus_count'].iloc[0]) if not busiest_focus.empty else 0
-        avg_focus = summary['focus_share'].mean()
+        avg_focus = summary_view['focus_share'].mean()
     else:
         total_incidents = int(current_l2.shape[0]) if not current_l2.empty else 0
-        top_value = summary['n_crimes'].max() if not summary.empty else 0
+        top_value = summary_view['n_crimes'].max() if not summary_view.empty else 0
         top_hex = int(top_value) if not pd.isna(top_value) else 0
         avg_focus = np.nan
 
@@ -693,11 +723,11 @@ def main():
     if focus_types and not focus_counts.empty:
         leading_hex = focus_counts.sort_values('focus_count', ascending=False).head(1)
         target_id = leading_hex['h3_id'].iloc[0]
-        focus_row = summary.loc[summary['h3_id'] == target_id, 'focus_share']
+        focus_row = summary_view.loc[summary_view['h3_id'] == target_id, 'focus_share']
         leading_focus = float(focus_row.iloc[0]) if not focus_row.empty else np.nan
-        leading_delta = leading_focus - summary['focus_share'].mean() if not np.isnan(leading_focus) else np.nan
+        leading_delta = leading_focus - summary_view['focus_share'].mean() if not np.isnan(leading_focus) else np.nan
     else:
-        leading_hex = summary.sort_values('n_crimes', ascending=False).head(1)
+        leading_hex = summary_view.sort_values('n_crimes', ascending=False).head(1)
         leading_focus = np.nan
         leading_delta = np.nan
 
@@ -721,9 +751,9 @@ def main():
     if drill_stack:
         parent_lat, parent_lon = h3.cell_to_latlng(drill_stack[-1]['parent_hex'])
         map_center = {'lat': parent_lat, 'lon': parent_lon}
-    if focus_hexes is not None and not summary.empty:
-        latitudes = summary['lat'].dropna()
-        longitudes = summary['lon'].dropna()
+    if focus_hexes is not None and not map_summary.empty:
+        latitudes = map_summary['lat'].dropna()
+        longitudes = map_summary['lon'].dropna()
         if not latitudes.empty and not longitudes.empty:
             map_center = {'lat': float(latitudes.mean()), 'lon': float(longitudes.mean())}
             map_zoom = min(RESOLUTION_ZOOM.get(effective_res, map_zoom) + 0.6, 14.5)
@@ -740,7 +770,6 @@ def main():
         if ctrl_prev.button(f"◀ {prev_label}", disabled=prev_disabled, use_container_width=True):
             st.session_state['base_res_pending'] = base_res - 1
             st.session_state['drill_stack'] = []
-            st.session_state['selected_day'] = None
             st.session_state['selected_dow'] = None
             st.rerun()
 
@@ -752,7 +781,6 @@ def main():
         if ctrl_next.button(f"{next_label} ▶", disabled=next_disabled, use_container_width=True):
             st.session_state['base_res_pending'] = base_res + 1
             st.session_state['drill_stack'] = []
-            st.session_state['selected_day'] = None
             st.session_state['selected_dow'] = None
             st.rerun()
 
@@ -767,7 +795,6 @@ def main():
             ):
                 drill_stack.pop()
                 st.session_state['drill_stack'] = drill_stack
-                st.session_state['selected_day'] = None
                 st.session_state['selected_dow'] = None
                 st.rerun()
 
@@ -791,6 +818,7 @@ def main():
             selection_state = st.plotly_chart(
                 map_fig,
                 use_container_width=True,
+                config=PLOTLY_CONFIG,
                 key=event_key,
                 on_select='rerun',
                 selection_mode=('points',),
@@ -830,35 +858,29 @@ def main():
                             'label': label,
                         })
                         st.session_state['drill_stack'] = drill_stack
-                        st.session_state['selected_day'] = None
                         st.session_state['selected_dow'] = None
                         st.rerun()
         with focus_tab:
             if focus_types and 'focus_share' in summary.columns:
                 st.caption('Each hex shows the proportion of incidents that belong to the selected crime categories — useful to see concentration versus overall volume.')
                 focus_fig = plot_focus_map(map_summary, effective_res, f'Focus share – {timeframe_label} {year}')
-                st.plotly_chart(focus_fig, use_container_width=True)
+                st.plotly_chart(focus_fig, use_container_width=True, config=PLOTLY_CONFIG)
             else:
                 st.info('Pick one or more categories or crime types to reveal the focus-share heatmap.')
 
     with metrics_col:
-        metrics_col.markdown('### Incident Snapshot')
-        metrics_col.caption(f'Top-line indicators for {scope_label} across {timeframe_caption}.')
-        rows_needed = (len(kpis) + 1) // 2
-        kpi_index = 0
-        for _ in range(rows_needed):
-            row_cols = metrics_col.columns(2, gap='small')
-            for col in row_cols:
-                if kpi_index >= len(kpis):
-                    break
-                item = kpis[kpi_index]
-                kwargs = {}
-                if item.get('delta') is not None:
-                    kwargs['delta'] = item['delta']
-                    if item.get('delta_color'):
-                        kwargs['delta_color'] = item['delta_color']
-                col.metric(item['label'], item['value'], **kwargs)
-                kpi_index += 1
+        metrics_col.markdown(f"### Incident Snapshot — {scope_label}")
+        metrics_col.caption(f'{timeframe_caption} focus across the selected filters.')
+        
+        for item in kpis:
+            kwargs = {}
+            if item.get('delta') is not None:
+                kwargs['delta'] = item['delta']
+                if item.get('delta_color'):
+                    kwargs['delta_color'] = item['delta_color']
+            # each KPI gets the full width of metrics_col
+            metrics_col.metric(item['label'], item['value'], **kwargs)
+
 
     working_l2 = current_l2.copy() if isinstance(current_l2, pd.DataFrame) else pd.DataFrame()
     has_datetime = 'datetime' in working_l2.columns
@@ -873,7 +895,8 @@ def main():
             for level, entry in enumerate(drill_stack, start=1):
                 parent_label = RESOLUTION_GUIDE.get(entry['parent_res'], {'label': f"r{entry['parent_res']}"})['label']
                 child_label = RESOLUTION_GUIDE.get(entry['res'], {'label': f"r{entry['res']}"})['label']
-                st.write(f"{level}. {parent_label} → {child_label} | {entry['label']} ({entry['parent_hex']})")
+                parent_area = describe_hex_area(l2_df, entry['parent_hex'], entry['parent_res'])
+                st.write(f"{level}. {parent_label} → {child_label} | {parent_area}")
 
     if not summary.empty:
         st.markdown('## Narrative & Composition')
@@ -881,7 +904,7 @@ def main():
         with story_col:
             st.markdown('### Quick hits')
             st.caption('Headline talking points for the selected hotspots and focus area.')
-            st.markdown(narrative_bullets(summary))
+            st.markdown(narrative_bullets(summary_view))
         with mix_col:
             st.markdown('### Crime mix (top 10)')
             st.caption('Dominant offense types for the filtered incidents.')
@@ -902,7 +925,7 @@ def main():
                         x='incident_count',
                         y='primary_type',
                         orientation='h',
-                        title='Top crime categories',
+                        title=f'Top crime categories — {scope_label}',
                         color='primary_type',
                         color_discrete_map=color_map,
                     )
@@ -912,7 +935,7 @@ def main():
                         template='plotly_white',
                         legend_title='Crime type',
                     )
-                    st.plotly_chart(crime_fig, use_container_width=True)
+                    st.plotly_chart(crime_fig, use_container_width=True, config=PLOTLY_CONFIG)
                     st.caption('Bar colours mirror the crime chips for this selection.')
                 else:
                     st.info('No crime mix available for this selection.')
@@ -923,14 +946,14 @@ def main():
         st.markdown('## Temporal Patterns')
         st.caption('How incident and arrest activity evolves over the selected period.')
         st.subheader('Daily trend & arrest compare')
-        trend_title = f"{'Selected ' if focus_types else ''}daily incidents – {timeframe_label} {year}"
+        trend_title = f"Daily incidents — {scope_label}"
         trend_fig = px.area(daily, x='date', y='n_crimes', title=trend_title, color_discrete_sequence=['#d73027'])
         trend_fig.update_traces(line_color='#a50026', fillcolor='rgba(215,48,31,0.35)')
         trend_fig.update_layout(yaxis_title='Incidents', xaxis_title='Date', height=360, template='plotly_white', hovermode='x unified')
 
         compare_cols = st.columns(2, gap='large')
         with compare_cols[0]:
-            st.plotly_chart(trend_fig, use_container_width=True)
+            st.plotly_chart(trend_fig, use_container_width=True, config=PLOTLY_CONFIG)
 
         with compare_cols[1]:
             if has_arrest_flag:
@@ -951,7 +974,7 @@ def main():
                     y='count',
                     color='metric',
                     color_discrete_map=line_colors,
-                    title='Incidents vs arrests by day',
+                    title=f'Incidents vs arrests — {scope_label}',
                 )
                 compare_fig.update_layout(
                     template='plotly_white',
@@ -960,42 +983,127 @@ def main():
                     xaxis_title='Date',
                     legend_title='Metric',
                 )
-                st.plotly_chart(compare_fig, use_container_width=True)
+                st.plotly_chart(compare_fig, use_container_width=True, config=PLOTLY_CONFIG)
             else:
                 st.info('Arrest data not available for this selection.')
 
         st.subheader('When do incidents spike?')
-        hourly = (working_l2.assign(hour=working_l2['datetime'].dt.hour)
-                              .groupby('hour')
-                              .agg(incidents=('datetime', 'size'))
-                              .reset_index())
+        hourly = (
+            working_l2.assign(hour=working_l2['datetime'].dt.hour)
+            .groupby('hour')
+            .agg(incidents=('datetime', 'size'))
+            .reset_index()
+        )
         if has_arrest_flag:
-            arrests_by_hour = (working_l2.assign(hour=working_l2['datetime'].dt.hour)
-                                           .groupby('hour')['arrest_made']
-                                           .apply(lambda s: s.eq(True).sum())
-                                           .reset_index(name='arrests'))
+            arrests_by_hour = (
+                working_l2.assign(hour=working_l2['datetime'].dt.hour)
+                .groupby('hour')['arrest_made']
+                .apply(lambda s: s.eq(True).sum())
+                .reset_index(name='arrests')
+            )
             hourly = hourly.merge(arrests_by_hour, on='hour', how='left').fillna({'arrests': 0})
-        hourly_fig = px.line(hourly, x='hour', y='incidents', markers=True,
-                             title='Incidents by hour of day', color_discrete_sequence=['#ff7f00'])
-        hourly_fig.update_layout(template='plotly_white', xaxis_title='Hour of day', yaxis_title='Incidents')
-        st.plotly_chart(hourly_fig, use_container_width=True)
 
-        dow = (working_l2.assign(dow=working_l2['datetime'].dt.day_name())
-                           .groupby('dow')
-                           .agg(incidents=('datetime', 'size'))
-                           .reindex(['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'])
-                           .reset_index())
+        dow = (
+            working_l2.assign(dow=working_l2['datetime'].dt.day_name())
+            .groupby('dow')
+            .agg(incidents=('datetime', 'size'))
+            .reindex(['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'])
+            .reset_index()
+        )
         if has_arrest_flag:
-            dow_arrests = (working_l2.assign(dow=working_l2['datetime'].dt.day_name())
-                                      .groupby('dow')['arrest_made']
-                                      .apply(lambda s: s.eq(True).sum())
-                                      .reindex(['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'])
-                                      .reset_index(name='arrests'))
+            dow_arrests = (
+                working_l2.assign(dow=working_l2['datetime'].dt.day_name())
+                .groupby('dow')['arrest_made']
+                .apply(lambda s: s.eq(True).sum())
+                .reindex(['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'])
+                .reset_index(name='arrests')
+            )
             dow = dow.merge(dow_arrests, on='dow', how='left').fillna({'arrests': 0})
-        dow_fig = px.bar(dow, x='dow', y='incidents', title='Incidents by day of week',
-                         color='incidents', color_continuous_scale=['#fee0d2', '#de2d26'])
-        dow_fig.update_layout(template='plotly_white', xaxis_title='Day', yaxis_title='Incidents', showlegend=False)
-        st.plotly_chart(dow_fig, use_container_width=True)
+
+        highlight_dow = st.session_state.get('selected_dow')
+        hourly_focus = hourly.copy()
+        if highlight_dow and highlight_dow in dow['dow'].values:
+            filtered = working_l2[working_l2['datetime'].dt.day_name() == highlight_dow]
+            if not filtered.empty:
+                hourly_focus = (
+                    filtered.assign(hour=filtered['datetime'].dt.hour)
+                    .groupby('hour')
+                    .agg(incidents=('datetime', 'size'))
+                    .reset_index()
+                )
+                if has_arrest_flag:
+                    hourly_focus = hourly_focus.merge(
+                        filtered.assign(hour=filtered['datetime'].dt.hour)
+                        .groupby('hour')['arrest_made']
+                        .apply(lambda s: s.eq(True).sum())
+                        .reset_index(name='arrests'),
+                        on='hour',
+                        how='left'
+                    ).fillna({'arrests': 0})
+            else:
+                highlight_dow = None
+
+        hourly_title = 'Hourly incidents — all days'
+        if highlight_dow:
+            hourly_title = f'Hourly incidents — {highlight_dow} focus'
+
+        hourly_fig = px.line(
+            hourly_focus,
+            x='hour',
+            y='incidents',
+            markers=True,
+            title=hourly_title,
+            color_discrete_sequence=['#ff7f00'],
+        )
+        hourly_fig.update_layout(template='plotly_white', xaxis_title='Hour of day', yaxis_title='Incidents')
+        if has_arrest_flag and 'arrests' in hourly_focus.columns:
+            hourly_fig.add_bar(
+                x=hourly_focus['hour'],
+                y=hourly_focus['arrests'],
+                name='Arrests',
+                marker_color='#74a9cf',
+                opacity=0.45,
+            )
+
+        charts_row = st.columns(2, gap='large')
+
+        with charts_row[0]:
+            dow_title = f'Day-of-week intensity — {scope_label}'
+            dow_fig = px.bar(
+                dow,
+                x='dow',
+                y='incidents',
+                title=dow_title,
+                color='incidents',
+                color_continuous_scale=['#fee0d2', '#de2d26'],
+            )
+            dow_fig.update_layout(template='plotly_white', xaxis_title='Day', yaxis_title='Incidents', showlegend=False)
+            if highlight_dow:
+                highlight_lines = ['#de2d26' if day == highlight_dow else '#bbbbbb' for day in dow['dow']]
+                dow_fig.update_traces(marker_line_color=highlight_lines, marker_line_width=2)
+            dow_selection = st.plotly_chart(
+                dow_fig,
+                use_container_width=True,
+                config=PLOTLY_CONFIG,
+                key='dow-chart',
+                on_select='rerun',
+                selection_mode=('points',),
+            )
+            if isinstance(dow_selection, dict):
+                points = dow_selection.get('selection', {}).get('points', [])
+                if points:
+                    point_index = points[0].get('point_index')
+                    if point_index is not None and 0 <= point_index < len(dow):
+                        st.session_state['selected_dow'] = dow.loc[point_index, 'dow']
+                else:
+                    st.session_state['selected_dow'] = None
+            if st.session_state.get('selected_dow'):
+                if st.button('Reset day-of-week filter', key='reset-dow', use_container_width=True):
+                    st.session_state['selected_dow'] = None
+                    st.rerun()
+
+        with charts_row[1]:
+            st.plotly_chart(hourly_fig, use_container_width=True, config=PLOTLY_CONFIG)
 
         st.subheader('Crimes vs arrests by category')
         if 'primary_type' in working_l2.columns:
@@ -1027,7 +1135,7 @@ def main():
                     color='metric',
                     barmode='group',
                     color_discrete_map={'incidents': '#d73027', 'arrests': '#1b7837'},
-                    title='Incident vs arrest counts (top categories)',
+                    title=f'Incident vs arrest counts — {scope_label}',
                 )
                 ca_fig.update_layout(
                     template='plotly_white',
@@ -1036,18 +1144,18 @@ def main():
                     legend_title='Metric',
                     xaxis_tickangle=-35,
                 )
-                st.plotly_chart(ca_fig, use_container_width=True)
+                st.plotly_chart(ca_fig, use_container_width=True, config=PLOTLY_CONFIG)
             elif not crime_incidents.empty:
                 ca_fig = px.bar(
                     crime_incidents,
                     x='primary_type',
                     y='incidents',
                     color='incidents',
-                    title='Incident counts by category',
+                    title=f'Incident counts by category — {scope_label}',
                     color_continuous_scale=['#fee5d9', '#fcae91', '#fb6a4a', '#cb181d'],
                 )
                 ca_fig.update_layout(template='plotly_white', xaxis_tickangle=-35, yaxis_title='Incidents')
-                st.plotly_chart(ca_fig, use_container_width=True)
+                st.plotly_chart(ca_fig, use_container_width=True, config=PLOTLY_CONFIG)
             else:
                 st.info('Not enough incident volume to summarise by category.')
         else:
@@ -1068,18 +1176,18 @@ def main():
                     x='incidents',
                     y='district_id',
                     orientation='h',
-                    title='Districts with highest incident volume',
+                    title=f'Districts with highest incident volume — {scope_label}',
                     color='incidents',
                     color_continuous_scale=['#edf8fb', '#66c2a4', '#006d2c'],
                 )
                 district_fig.update_layout(template='plotly_white', yaxis_title='District', xaxis_title='Incidents', showlegend=False)
-                st.plotly_chart(district_fig, use_container_width=True)
+                st.plotly_chart(district_fig, use_container_width=True, config=PLOTLY_CONFIG)
 
     st.subheader('Signature streets per hotspot')
-    street_cols = [col for col in ['signature_block', 'n_crimes', 'selection_n_crimes', 'common_crime', 'district_id', 'ward_id', 'focus_share'] if col in summary.columns]
+    street_cols = [col for col in ['signature_block', 'n_crimes', 'selection_n_crimes', 'common_crime', 'district_id', 'ward_id', 'focus_share'] if col in summary_view.columns]
     if street_cols:
         streets = (
-            summary[street_cols]
+            summary_view[street_cols]
             .sort_values('selection_n_crimes' if focus_types else 'n_crimes', ascending=False)
             .head(20)
             .fillna({'focus_share': 0, 'common_crime': 'UNKNOWN', 'signature_block': 'UNKNOWN'})
